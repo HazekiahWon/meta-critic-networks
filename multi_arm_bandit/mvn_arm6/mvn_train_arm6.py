@@ -213,7 +213,7 @@ def main():
 
             task_params = [task.probs for task in task_list]
             if (step+1) % 20 == 0:
-                print("episode:",episode,"step:",step+1,"value:",torch.mean(values).data[0],"value loss:",meta_value_network_loss.data[0])
+                print(("episode:",episode,"step:",step+1,"value:",torch.mean(values).data[0],"value loss:",meta_value_network_loss.data[0]))
         	
             pre_actions = actions
             pre_rewards = rewards
@@ -223,7 +223,7 @@ def main():
             # Save meta value network
             torch.save(meta_value_network.state_dict(),"meta_value_network_arm6.pkl")
             torch.save(task_config_network.state_dict(),"task_config_network_arm6.pkl")
-            print("save networks for episode:",episode)
+            print(("save networks for episode:",episode))
 
 
 if __name__ == '__main__':

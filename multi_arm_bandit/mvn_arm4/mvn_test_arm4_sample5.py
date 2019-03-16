@@ -179,10 +179,10 @@ def main():
         results.append(res_i)
         total_rewards += aver_reward
 
-        print("aver_reward",aver_reward,"correct prob:",correct_prob,"task:",task.probs)
+        print(("aver_reward",aver_reward,"correct prob:",correct_prob,"task:",task.probs))
 
     save_to_json('mvn_arm_4_sample_5.json', results) 
-    print("total aver reward:",total_rewards/TASK_NUMS)
+    print(("total aver reward:",total_rewards/TASK_NUMS))
 
         
 

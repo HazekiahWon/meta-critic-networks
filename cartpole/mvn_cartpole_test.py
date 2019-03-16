@@ -111,7 +111,7 @@ def roll_out(actor_network,task,sample_nums):
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
     running_add = final_r
-    for t in reversed(range(0, len(r))):
+    for t in reversed(list(range(0, len(r)))):
         running_add = running_add * gamma + r[t]
         discounted_r[t] = running_add
     return discounted_r
@@ -168,7 +168,10 @@ def main():
 
 
             # init task config [1, sample_nums,task_config] task_config size=3
-            pre_data_samples = torch.cat((pre_states[-9:],pre_actions[-9:],torch.Tensor(pre_rewards)[-9:]),1).unsqueeze(0)
+            # print(pre_states.size(),pre_actions.size(), torch.Tensor(pre_rewards).reshape([-1,1]).size())
+            pre_data_samples = torch.cat((pre_states[-9:],
+                                          pre_actions[-9:],
+                                          torch.Tensor(pre_rewards).reshape([-1,1])[-9:]),1).unsqueeze(0)
             task_config = task_config_network(Variable(pre_data_samples).cuda()) # [1,3]
 
             states,actions,rewards,is_done,final_state = roll_out(actor_network,task,SAMPLE_NUMS)
@@ -216,7 +219,7 @@ def main():
                         state = next_state
                         if done:
                             break
-                print("step:",step+1,"task episode:",task.episodes,"test result:",result/10.0)
+                print(("step:",step+1,"task episode:",task.episodes,"test result:",result/10.0))
                 steps.append(step+1)
                 task_episodes.append(task.episodes)
                 test_results.append(result/10)

@@ -183,10 +183,10 @@ def main():
 
         results.append(res_i)
 
-        print("aver_reward",np.mean(aver_rewards),"correct prob:",np.mean(correct_prob),"task:",task.probs)
+        print(("aver_reward",np.mean(aver_rewards),"correct prob:",np.mean(correct_prob),"task:",task.probs))
 
     save_to_json('mvn_arm_6_sample_15.json', results)
-    print("total aver reward:",total_rewards/TASK_NUMS/TEST_NUMS_PER_TASK)
+    print(("total aver reward:",total_rewards/TASK_NUMS/TEST_NUMS_PER_TASK))
 
 
 

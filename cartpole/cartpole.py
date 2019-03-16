@@ -43,17 +43,17 @@ class CartPoleEnv(gym.Env):
         self.action_space = spaces.Discrete(2)
         self.observation_space = spaces.Box(-high, high)
 
-        self._seed()
+        self.seed()
         self.viewer = None
         self.state = None
 
         self.steps_beyond_done = None
 
-    def _seed(self, seed=None):
+    def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
         return [seed]
 
-    def _step(self, action):
+    def step(self, action):
         assert self.action_space.contains(action), "%r (%s) invalid"%(action, type(action))
         state = self.state
         x, x_dot, theta, theta_dot = state
@@ -88,13 +88,13 @@ class CartPoleEnv(gym.Env):
 
         return np.array(self.state), reward, done, {}
 
-    def _reset(self):
+    def reset(self):
         self.state = self.np_random.uniform(low=-0.05, high=0.05, size=(4,))
         self.steps_beyond_done = None
         self.result = 0
         return np.array(self.state)
 
-    def _render(self, mode='human', close=False):
+    def render(self, mode='human', close=False):
         if close:
             if self.viewer is not None:
                 self.viewer.close()

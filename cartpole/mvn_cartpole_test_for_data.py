@@ -116,7 +116,7 @@ def roll_out(actor_network,task,sample_nums):
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
     running_add = final_r
-    for t in reversed(range(0, len(r))):
+    for t in reversed(list(range(0, len(r)))):
         running_add = running_add * gamma + r[t]
         discounted_r[t] = running_add
     return discounted_r
@@ -229,7 +229,7 @@ def main():
                             break
                 aver_result = result/10.0
                 test_result.append(aver_result)
-                print("task length:",task_length,"step:",step+1,"result:",aver_result)
+                print(("task length:",task_length,"step:",step+1,"result:",aver_result))
 
 
 

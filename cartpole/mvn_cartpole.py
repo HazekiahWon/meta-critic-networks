@@ -114,7 +114,7 @@ def roll_out(actor_network,task,sample_nums):
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
     running_add = final_r
-    for t in reversed(range(0, len(r))):
+    for t in reversed(list(range(0, len(r)))):
         running_add = running_add * gamma + r[t]
         discounted_r[t] = running_add
     return discounted_r
@@ -147,7 +147,7 @@ def main():
     [task.reset() for task in task_list]
 
     task_lengths = [task.length for task in task_list]
-    print("task length:",task_lengths)
+    print(("task length:",task_lengths))
 
     for episode in range(EPISODE):
         # ----------------- Training ------------------
@@ -156,7 +156,7 @@ def main():
             # renew the tasks
             task_list = [CartPoleEnv(np.random.uniform(L_MIN,L_MAX)) for task in range(TASK_NUMS)]
             task_lengths = [task.length for task in task_list]
-            print("task length:",task_lengths)
+            print(("task length:",task_lengths))
             [task.reset() for task in task_list]
 
         # fetch pre data samples for task config network
@@ -241,14 +241,14 @@ def main():
                             state = next_state
                             if done:
                                 break
-                    print("episode:",episode,"task:",i,"step:",step+1,"test result:",result/10.0)
+                    print(("episode:",episode,"task:",i,"step:",step+1,"test result:",result/10.0))
 
         
         if (episode+1) % 10 == 0 :
             # Save meta value network
             torch.save(meta_value_network.state_dict(),"meta_value_network_cartpole.pkl")
             torch.save(task_config_network.state_dict(),"task_config_network_cartpole.pkl")
-            print("save networks for episode:",episode)
+            print(("save networks for episode:",episode))
 
 if __name__ == '__main__':
     main()

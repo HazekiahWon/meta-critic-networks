@@ -201,8 +201,8 @@ def main():
 
             
             if (step+1) % 10 == 0:
-                print ('Epoch [%d/%d], Loss: %.4f,value Loss: %.4f'
-                    %(step+1, episode, actor_network_loss.data[0],meta_value_network_loss.data[0]))
+                print(('Epoch [%d/%d], Loss: %.4f,value Loss: %.4f'
+                    %(step+1, episode, actor_network_loss.data[0],meta_value_network_loss.data[0])))
         	
             pre_x_samples = x_samples
             pre_y_samples = y_samples
@@ -212,7 +212,7 @@ def main():
             # Save meta value network
             torch.save(meta_value_network.state_dict(),"meta_value_network.pkl")
             torch.save(task_config_network.state_dict(),"task_config_network.pkl")
-            print("save networks for episode:",episode+1)
+            print(("save networks for episode:",episode+1))
 
 
 if __name__ == '__main__':

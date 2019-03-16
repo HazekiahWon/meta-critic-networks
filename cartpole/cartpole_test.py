@@ -9,5 +9,5 @@ for step in range(1000):
 	next_state,reward,done,_ = env.step(0)
 
 	if done:
-		print "done reward:",reward
+		print("done reward:",reward)
 		break
