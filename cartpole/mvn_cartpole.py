@@ -181,7 +181,10 @@ def main():
 
             for i in range(TASK_NUMS):
                 # init task config [1, sample_nums,task_config] task_config size=3
-                pre_data_samples = torch.cat((pre_states[i][-9:],pre_actions[i][-9:],torch.Tensor(pre_rewards[i])[-9:]),1).unsqueeze(0)
+                pre_data_samples = torch.cat(
+                    (pre_states[i][-9:],
+                     pre_actions[i][-9:],
+                     torch.Tensor(pre_rewards[i]).reshape([-1,1])[-9:]),1).unsqueeze(0)
                 task_config = task_config_network(Variable(pre_data_samples).cuda()) # [1,3]
 
                 states,actions,rewards,is_done,final_state = roll_out(actor_network_list[i],task_list[i],SAMPLE_NUMS)
