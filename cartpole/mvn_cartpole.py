@@ -78,17 +78,24 @@ class TaskConfigNetwork(nn.Module):
         return out
 
 def roll_out(actor_network,task,sample_nums):
+    """
+    sample a sequence of time steps
+    :param actor_network:
+    :param task:
+    :param sample_nums:
+    :return:
+    """
     states = []
     actions = []
     rewards = []
     is_done = False
-    state = task.state
+    state = task.state # ?
     result = 0
     for j in range(sample_nums):
         states.append(state)
         log_softmax_action = actor_network(Variable(torch.Tensor([state])).cuda())
         softmax_action = torch.exp(log_softmax_action)
-        action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0])
+        action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0]) # sample from cat distri
         one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
         next_state,reward,done,_ = task.step(action)
         #task.result += reward
@@ -129,21 +136,22 @@ def main():
     # init meta value network with a task config network
     meta_value_network = MetaValueNetwork(input_size = meta_value_input_dim,hidden_size = 80,output_size = 1)
     task_config_network = TaskConfigNetwork(input_size = task_config_input_dim,hidden_size = 30,num_layers = 1,output_size = 3)
+    # ?
     meta_value_network.cuda()
     task_config_network.cuda()
-
+    # load params
     if os.path.exists("meta_value_network_cartpole.pkl"):
         meta_value_network.load_state_dict(torch.load("meta_value_network_cartpole.pkl"))
         print("load meta value network success")
     if os.path.exists("task_config_network_cartpole.pkl"):
         task_config_network.load_state_dict(torch.load("task_config_network_cartpole.pkl"))
         print("load task config network success")
-
+    # optim instances for two nets
     meta_value_network_optim = torch.optim.Adam(meta_value_network.parameters(),lr=0.001)
-    task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=0.001)
+    task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=0.001) # not used?
 
-    # init a task generator for data fetching
-    task_list = [CartPoleEnv(np.random.uniform(L_MIN,L_MAX)) for task in range(TASK_NUMS)]
+    # multiple tasks, can randomizing environments by sending randomized args, initialize all tasks
+    task_list = [CartPoleEnv(np.random.uniform(L_MIN,L_MAX)) for task in range(TASK_NUMS)] # a list of env
     [task.reset() for task in task_list]
 
     task_lengths = [task.length for task in task_list]
@@ -152,7 +160,7 @@ def main():
     for episode in range(EPISODE):
         # ----------------- Training ------------------
 
-        if (episode+1) % 10 ==0 :
+        if (episode+1) % 10 ==0 : # sample another batch of tasks
             # renew the tasks
             task_list = [CartPoleEnv(np.random.uniform(L_MIN,L_MAX)) for task in range(TASK_NUMS)]
             task_lengths = [task.length for task in task_list]
@@ -161,12 +169,12 @@ def main():
 
         # fetch pre data samples for task config network
         # [task_nums,sample_nums,x+y`]
-        
+        # for each task use a signle actor
         actor_network_list = [ActorNetwork(STATE_DIM,40,ACTION_DIM) for i in range(TASK_NUMS)]
         [actor_network.cuda() for actor_network in actor_network_list]
         actor_network_optim_list = [torch.optim.Adam(actor_network.parameters(),lr = 0.01) for actor_network in actor_network_list]
 
-        # sample pre state,action,reward for task config
+        # a list of num_task items
         pre_states = []
         pre_actions = []
         pre_rewards = []
@@ -185,26 +193,30 @@ def main():
                     (pre_states[i][-9:],
                      pre_actions[i][-9:],
                      torch.Tensor(pre_rewards[i]).reshape([-1,1])[-9:]),1).unsqueeze(0)
+                # for each task, given sar, outputs the embedding for the task.
                 task_config = task_config_network(Variable(pre_data_samples).cuda()) # [1,3]
 
                 states,actions,rewards,is_done,final_state = roll_out(actor_network_list[i],task_list[i],SAMPLE_NUMS)
                 final_r = 0
                 if not is_done:
                     value_inputs = torch.cat((Variable(final_state.unsqueeze(0)).cuda(),task_config.detach()),1)
+                    # given s,t, the meta-critic predicts a vale
                     final_r = meta_value_network(value_inputs).cpu().data.numpy()[0]
 
                 # train actor network
-                actor_network_optim_list[i].zero_grad()
-                states_var = Variable(states).cuda()
+                actor_network_optim_list[i].zero_grad() # ?
+                states_var = Variable(states).cuda() # state sequence
                 
                 actions_var = Variable(actions).cuda()
-                task_configs = task_config.repeat(1,len(rewards)).view(-1,3)
-                log_softmax_actions = actor_network_list[i](states_var)
-                vs = meta_value_network(torch.cat((states_var,task_configs.detach()),1)).detach()
+                task_configs = task_config.repeat(1,len(rewards)).view(-1,3) # ?
+                log_softmax_actions = actor_network_list[i](states_var) # why input the state sequence
+                log_softmax_actions = actor_network_list[i](states_var) # why input the state sequence
+                vs = meta_value_network(torch.cat((states_var,task_configs.detach()),1)).detach() # why state sequence now
                 # calculate qs
                 qs = Variable(torch.Tensor(discount_reward(rewards,0.99,final_r))).cuda()
 
                 advantages = qs - vs
+                # why is there multiplied by actions_var
                 actor_network_loss = - torch.mean(torch.sum(log_softmax_actions*actions_var,1)* advantages) #+ entropy #+ actor_criterion(actor_y_samples,target_y)
                 actor_network_loss.backward()
                 torch.nn.utils.clip_grad_norm(actor_network_list[i].parameters(),0.5)
@@ -229,13 +241,13 @@ def main():
                 pre_states[i] = states
                 pre_actions[i] = actions
                 pre_rewards[i] = rewards
-
+                # why use testing tasks?
                 if (step + 1) % 100 == 0:
                     result = 0
                     test_task = CartPoleEnv(length = task_list[i].length)
-                    for test_epi in range(10):
+                    for test_epi in range(10): # test for 10 epochs and takes the average
                         state = test_task.reset()
-                        for test_step in range(200):
+                        for test_step in range(200): # rollout for 200 steps
                             softmax_action = torch.exp(actor_network_list[i](Variable(torch.Tensor([state])).cuda()))
                             #print(softmax_action.data)
                             action = np.argmax(softmax_action.cpu().data.numpy()[0])
