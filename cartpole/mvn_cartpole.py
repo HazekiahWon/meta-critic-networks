@@ -21,8 +21,14 @@ L_MAX = 5    # max length
 
 # Hyper Parameters
 TASK_NUMS = 10
-STATE_DIM = 4
-ACTION_DIM = 2
+STATE_DIM = 4 # cont
+ACTION_DIM = 2 # cat
+task_nlayer = 3
+
+Z_DIM = 16
+actor_dim = 64
+task_dim = 64
+value_dim = 64
 TASK_CONFIG_DIM = 3
 EPISODE = 1000
 STEP = 500
@@ -45,7 +51,9 @@ class ActorNetwork(nn.Module):
         return out
 
 class MetaValueNetwork(nn.Module):
-
+    """
+    given state,action,z, output reward
+    """
     def __init__(self,input_size,hidden_size,output_size):
         super(MetaValueNetwork, self).__init__()
         self.fc1 = nn.Linear(input_size,hidden_size)
@@ -56,6 +64,20 @@ class MetaValueNetwork(nn.Module):
         out = F.relu(self.fc1(x))
         out = F.relu(self.fc2(out))
         out = self.fc3(out)
+        return out
+class DynamicsEmb(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, k, timestep):
+        super(DynamicsEmb, self).__init__()
+        self.conv1 = nn.Conv1d(input_size, hidden_size, k, padding=k//2)
+        self.conv2 = nn.Conv1d(hidden_size, hidden_size, k, padding=k//2)
+        self.conv3 = nn.Conv1d(hidden_size, output_size, k)
+        self.pool = nn.AvgPool1d(timestep-k+1)
+
+    def forward(self, x):
+        out = F.relu(self.conv1(x))
+        out = F.relu(self.conv2(out))
+        out = F.relu(self.conv3(out))
+        out = self.pool(out) # 1,output_size
         return out
 
 class TaskConfigNetwork(nn.Module):
@@ -93,9 +115,11 @@ def roll_out(actor_network,task,sample_nums):
     result = 0
     for j in range(sample_nums):
         states.append(state)
-        log_softmax_action = actor_network(Variable(torch.Tensor([state])).cuda())
-        softmax_action = torch.exp(log_softmax_action)
-        action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0]) # sample from cat distri
+        if actor_network is None: action = task.action_space.sample()
+        else:
+            log_softmax_action = actor_network(Variable(torch.Tensor([state])).cuda())
+            softmax_action = torch.exp(log_softmax_action)
+            action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0]) # sample from cat distri
         one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
         next_state,reward,done,_ = task.step(action)
         #task.result += reward
@@ -136,8 +160,16 @@ def main():
     task_config_input_dim = STATE_DIM + ACTION_DIM + 1 # 7
 
     # task_embedding + dynamics
-    meta_value_network = MetaValueNetwork(input_size = meta_value_input_dim,hidden_size = 80,output_size = 1)
-    task_config_network = TaskConfigNetwork(input_size = task_config_input_dim,hidden_size = 30,num_layers = 1,output_size = 3)
+    meta_value_network = MetaValueNetwork(input_size = STATE_DIM+ACTION_DIM+Z_DIM,hidden_size = value_dim,output_size = 1)
+    # task_config_network = TaskConfigNetwork(input_size = STATE_DIM*2+ACTION_DIM,
+    #                                         hidden_size = task_dim,
+    #                                         num_layers = task_nlayer,
+    #                                         output_size = Z_DIM)
+    task_config_network = DynamicsEmb(input_size=STATE_DIM*2+ACTION_DIM,
+                                      hidden_size=task_dim,
+                                      output_size=Z_DIM,
+                                      k=5,
+                                      timestep=SAMPLE_NUMS)
     # ?
     meta_value_network.cuda()
     task_config_network.cuda()
@@ -169,12 +201,9 @@ def main():
             print(("task length:",task_lengths))
             [task.reset() for task in task_list]
 
-        # fetch pre data samples for task config network
-        # [task_nums,sample_nums,x+y`]
-        # for each task use a signle actor
-        actor_network = ActorNetwork(STATE_DIM,40,ACTION_DIM)
+        actor_network = ActorNetwork(STATE_DIM+Z_DIM,actor_dim,ACTION_DIM)
         actor_network.cuda()
-        actor_network_optim_list = torch.optim.Adam(actor_network.parameters(),lr = 0.01)
+        actor_network_optim = torch.optim.Adam(actor_network.parameters(),lr = 0.01)
 
         # a list of num_task items
         pre_states = []
@@ -182,7 +211,8 @@ def main():
         pre_rewards = []
         # can use multiprocessing
         for i in range(TASK_NUMS):
-            states,actions,rewards,_,_ = roll_out(actor_network,task_list[i],SAMPLE_NUMS)
+            # currently we sample from the action space, because the actor requires dynamics embedding which we for now does not know
+            states,actions,rewards,_,_ = roll_out(None,task_list[i],SAMPLE_NUMS)
             pre_states.append(states)
             pre_actions.append(actions)
             pre_rewards.append(rewards)
@@ -194,29 +224,29 @@ def main():
             for i in range(TASK_NUMS):
                 # init task config [1, sample_nums,task_config] task_config size=3
                 pre_data_samples = torch.cat( # s,a,s
-                    (pre_states[i][:-1],
-                     pre_actions[i][:-1],
-                     pre_states[i][1:]),1).unsqueeze(0) # make a fake batch
+                    (pre_states[i][:-1], # t-1,4
+                     pre_actions[i][:-1], # t-1,2
+                     pre_states[i][1:]),dim=1) # t-1,10
                 # sas - z
-                task_config = task_config_network(Variable(pre_data_samples).cuda()) # [1,3]
+                task_config = task_config_network(Variable(pre_data_samples).cuda())
 
-                states,actions,rewards,is_done,final_state = roll_out(actor_network,task_list[i],SAMPLE_NUMS)
+                # states,actions,rewards,is_done,final_state = roll_out(actor_network,task_list[i],SAMPLE_NUMS)
                 final_r = 0
-                if not is_done:
-                    # saz - r
-                    value_inputs = torch.cat(
-                        (pre_states[i], pre_actions[i], task_config.repeat(SAMPLE_NUMS, axis=0)), dim=-1)
-                    pred_rs = meta_value_network(value_inputs) # for vae loss
-                    value_inputs = torch.cat(
-                        (pre_states[i][-1], pre_actions[i][-1], task_config), dim=-1
-                    ).unsqueeze(0)
+                # if not is_done:
+                # saz - r
+                value_inputs = torch.cat(
+                    (pre_states[i], pre_actions[i], task_config.repeat(SAMPLE_NUMS, axis=0)), dim=-1) # t,22
+                pred_rs = meta_value_network(value_inputs) # for vae loss
+                # value_inputs = torch.cat(
+                #     (pre_states[i][-1], pre_actions[i][-1], task_config), dim=-1
+                # ).unsqueeze(0)
                     # given s,t, the meta-critic predicts a vale
-                    final_r = meta_value_network(value_inputs).cpu().data.numpy()[0]
+                    # final_r = meta_value_network(value_inputs).cpu().data.numpy()[0]
 
 
-                states_var = Variable(states).cuda() # state sequence
-                
-                actions_var = Variable(actions).cuda()
+                # states_var = Variable(states).cuda() # state sequence
+                # actions_var = Variable(actions).cuda()
+                # ===> should be resampled
                 actor_inputs = torch.cat((pre_states[i],task_config.repeat(SAMPLE_NUMS, axis=0)), dim=1) # sz - a
                 log_softmax_actions = actor_network(actor_inputs) # why input the state sequence
                 # randomly sample to get a baseline
@@ -245,11 +275,11 @@ def main():
                 criterion = nn.MSELoss()
                 value_loss.append(criterion(pred_rs,target_values))
             # train actor network
-            actor_network_optim_list.zero_grad()  # ?
+            actor_network_optim.zero_grad()  # ?
             actor_network_loss = torch.mean(torch.stack(tuple(actor_loss)))
             actor_network_loss.backward()
             torch.nn.utils.clip_grad_norm(actor_network.parameters(), 0.5)
-            actor_network_optim_list.step()
+            actor_network_optim.step()
 
             meta_value_network_optim.zero_grad()
             meta_value_network_loss = torch.mean(torch.stack(tuple(value_loss)))

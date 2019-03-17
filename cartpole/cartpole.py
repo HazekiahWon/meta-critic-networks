@@ -41,7 +41,7 @@ class CartPoleEnv(gym.Env):
             np.finfo(np.float32).max])
 
         self.action_space = spaces.Discrete(2)
-        self.observation_space = spaces.Box(-high, high)
+        self.observation_space = spaces.Box(-high, high) # 4d vec
 
         self.seed()
         self.viewer = None
