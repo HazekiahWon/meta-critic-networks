@@ -133,7 +133,7 @@ def main():
     meta_value_input_dim =  STATE_DIM + TASK_CONFIG_DIM # 7
     task_config_input_dim = STATE_DIM + ACTION_DIM + 1 # 7
 
-    # init meta value network with a task config network
+    # task_embedding + dynamics
     meta_value_network = MetaValueNetwork(input_size = meta_value_input_dim,hidden_size = 80,output_size = 1)
     task_config_network = TaskConfigNetwork(input_size = task_config_input_dim,hidden_size = 30,num_layers = 1,output_size = 3)
     # ?
@@ -148,7 +148,7 @@ def main():
         print("load task config network success")
     # optim instances for two nets
     meta_value_network_optim = torch.optim.Adam(meta_value_network.parameters(),lr=0.001)
-    task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=0.001) # not used?
+    # task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=0.001) # not used?
 
     # multiple tasks, can randomizing environments by sending randomized args, initialize all tasks
     task_list = [CartPoleEnv(np.random.uniform(L_MIN,L_MAX)) for task in range(TASK_NUMS)] # a list of env
@@ -170,14 +170,15 @@ def main():
         # fetch pre data samples for task config network
         # [task_nums,sample_nums,x+y`]
         # for each task use a signle actor
-        actor_network_list = [ActorNetwork(STATE_DIM,40,ACTION_DIM) for i in range(TASK_NUMS)]
-        [actor_network.cuda() for actor_network in actor_network_list]
-        actor_network_optim_list = [torch.optim.Adam(actor_network.parameters(),lr = 0.01) for actor_network in actor_network_list]
+        actor_network = ActorNetwork(STATE_DIM,40,ACTION_DIM)
+        actor_network.cuda()
+        actor_network_optim_list = torch.optim.Adam(actor_network.parameters(),lr = 0.01)
 
         # a list of num_task items
         pre_states = []
         pre_actions = []
         pre_rewards = []
+        # can use multiprocessing
         for i in range(TASK_NUMS):
             states,actions,rewards,_,_ = roll_out(actor_network_list[i],task_list[i],SAMPLE_NUMS)
             pre_states.append(states)
