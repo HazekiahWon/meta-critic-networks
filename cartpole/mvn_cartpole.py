@@ -126,6 +126,8 @@ def discount_reward(r, gamma,final_r):
         discounted_r[t] = running_add
     return discounted_r
 
+def dis_reward(rs, gamma):
+    return np.sum(rs*np.cumproduct([1]+[gamma]*(len(rs)-1)))
 
 def main():
     # Define dimensions of the networks
@@ -180,70 +182,91 @@ def main():
         pre_rewards = []
         # can use multiprocessing
         for i in range(TASK_NUMS):
-            states,actions,rewards,_,_ = roll_out(actor_network_list[i],task_list[i],SAMPLE_NUMS)
+            states,actions,rewards,_,_ = roll_out(actor_network,task_list[i],SAMPLE_NUMS)
             pre_states.append(states)
             pre_actions.append(actions)
             pre_rewards.append(rewards)
 
 
         for step in range(STEP):
-
+            actor_loss = list()
+            value_loss = list()
             for i in range(TASK_NUMS):
                 # init task config [1, sample_nums,task_config] task_config size=3
-                pre_data_samples = torch.cat(
-                    (pre_states[i][-9:],
-                     pre_actions[i][-9:],
-                     torch.Tensor(pre_rewards[i]).reshape([-1,1])[-9:]),1).unsqueeze(0)
-                # for each task, given sar, outputs the embedding for the task.
+                pre_data_samples = torch.cat( # s,a,s
+                    (pre_states[i][:-1],
+                     pre_actions[i][:-1],
+                     pre_states[i][1:]),1).unsqueeze(0) # make a fake batch
+                # sas - z
                 task_config = task_config_network(Variable(pre_data_samples).cuda()) # [1,3]
 
-                states,actions,rewards,is_done,final_state = roll_out(actor_network_list[i],task_list[i],SAMPLE_NUMS)
+                states,actions,rewards,is_done,final_state = roll_out(actor_network,task_list[i],SAMPLE_NUMS)
                 final_r = 0
                 if not is_done:
-                    value_inputs = torch.cat((Variable(final_state.unsqueeze(0)).cuda(),task_config.detach()),1)
+                    # saz - r
+                    value_inputs = torch.cat(
+                        (pre_states[i], pre_actions[i], task_config.repeat(SAMPLE_NUMS, axis=0)), dim=-1)
+                    pred_rs = meta_value_network(value_inputs) # for vae loss
+                    value_inputs = torch.cat(
+                        (pre_states[i][-1], pre_actions[i][-1], task_config), dim=-1
+                    ).unsqueeze(0)
                     # given s,t, the meta-critic predicts a vale
                     final_r = meta_value_network(value_inputs).cpu().data.numpy()[0]
 
-                # train actor network
-                actor_network_optim_list[i].zero_grad() # ?
+
                 states_var = Variable(states).cuda() # state sequence
                 
                 actions_var = Variable(actions).cuda()
-                task_configs = task_config.repeat(1,len(rewards)).view(-1,3) # ?
-                log_softmax_actions = actor_network_list[i](states_var) # why input the state sequence
-                log_softmax_actions = actor_network_list[i](states_var) # why input the state sequence
-                vs = meta_value_network(torch.cat((states_var,task_configs.detach()),1)).detach() # why state sequence now
+                actor_inputs = torch.cat((pre_states[i],task_config.repeat(SAMPLE_NUMS, axis=0)), dim=1) # sz - a
+                log_softmax_actions = actor_network(actor_inputs) # why input the state sequence
+                # randomly sample to get a baseline
+                random_actions = None
+                n_sample = 10
+                gamma = .99
+                value_inputs = torch.cat(
+                    (pre_states[i][0].repeat(n_sample, axis=0),random_actions), dim=1
+                )
+                vs = meta_value_network(value_inputs).detach() # why state sequence now
                 # calculate qs
-                qs = Variable(torch.Tensor(discount_reward(rewards,0.99,final_r))).cuda()
-
+                # qs = Variable(torch.Tensor(discount_reward(rewards,0.99,final_r))).cuda()
+                qs = dis_reward(rewards, gamma)
                 advantages = qs - vs
                 # why is there multiplied by actions_var
-                actor_network_loss = - torch.mean(torch.sum(log_softmax_actions*actions_var,1)* advantages) #+ entropy #+ actor_criterion(actor_y_samples,target_y)
-                actor_network_loss.backward()
-                torch.nn.utils.clip_grad_norm(actor_network_list[i].parameters(),0.5)
+                actor_loss.append(- torch.mean(torch.sum(log_softmax_actions*actions_var,1)* advantages)) #+ entropy #+ actor_criterion(actor_y_samples,target_y)
 
-                actor_network_optim_list[i].step()
+
 
                 # train value network
 
-                meta_value_network_optim.zero_grad()
 
-                target_values = qs
-                values = meta_value_network(torch.cat((states_var,task_configs),1))
+
+                target_values = [dis_reward(rewards[i:], gamma) for i in range(len(rewards))]
+                # values = meta_value_network(torch.cat((states_var,task_configs),1))
                 criterion = nn.MSELoss()
-                meta_value_network_loss = criterion(values,target_values)
-                meta_value_network_loss.backward()
-                torch.nn.utils.clip_grad_norm(meta_value_network.parameters(),0.5)
+                value_loss.append(criterion(pred_rs,target_values))
+            # train actor network
+            actor_network_optim_list.zero_grad()  # ?
+            actor_network_loss = torch.mean(torch.stack(tuple(actor_loss)))
+            actor_network_loss.backward()
+            torch.nn.utils.clip_grad_norm(actor_network.parameters(), 0.5)
+            actor_network_optim_list.step()
 
-                meta_value_network_optim.step()                
+            meta_value_network_optim.zero_grad()
+            meta_value_network_loss = torch.mean(torch.stack(tuple(value_loss)))
+            meta_value_network_loss.backward()
+            torch.nn.utils.clip_grad_norm(meta_value_network.parameters(),0.5)
+
+            meta_value_network_optim.step()
                 
-                # train actor network
-                
-                pre_states[i] = states
-                pre_actions[i] = actions
-                pre_rewards[i] = rewards
-                # why use testing tasks?
-                if (step + 1) % 100 == 0:
+        # train actor network
+
+        # pre_states[i] = states
+        # pre_actions[i] = actions
+        # pre_rewards[i] = rewards
+        # why use testing tasks?
+
+            if (step + 1) % 100 == 0:
+                for i in range(TASK_NUMS):
                     result = 0
                     test_task = CartPoleEnv(length = task_list[i].length)
                     for test_epi in range(10): # test for 10 epochs and takes the average
