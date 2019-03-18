@@ -203,6 +203,7 @@ def get_dyn_embedding(s,a,sp, network):
     return out
 
 def get_predicted_rewards(s,a,z, network, do_grad=False):
+
     value_inputs = torch.cat(
         (s,a,z), dim=-1)  # t,22
     if do_grad: value_inputs = Variable(value_inputs)

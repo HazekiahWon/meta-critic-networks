@@ -35,7 +35,7 @@ def main():
     meta_value_network_optim = torch.optim.Adam(meta_value_network.parameters(),lr=vae_lr)
     task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=vae_lr) # not used?
     actor_network_optim = torch.optim.Adam(actor_network.parameters(), lr=0.01)
-
+    # task_list = resample_task()
     for episode in range(EPISODE):
         # ----------------- Training ------------------
         print(f'train VAE.')
@@ -54,16 +54,17 @@ def main():
             for i in range(TASK_NUMS):
                 states, actions, rewards, _, _ = roll_out(None, task_list[i], HORIZON, None, reset=True)
 
-                task_config = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
+                dyn_encoder = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
                                                 task_config_network) # 1,z_dim
 
-                pred_rs = get_predicted_rewards(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda(),
-                                                task_config.repeat(states.shape[0], 1),
+                reward_decoder = get_predicted_rewards(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda(),
+                                                dyn_encoder.repeat(states.shape[0], 1),
                                                 meta_value_network, do_grad=True)
+                vae = VAE(dyn_encoder, reward_decoder, vae_dim, Z_DIM)
                 target_values = torch.Tensor(seq_reward2go(rewards, gamma)).view(-1,1).cuda() #[dis_reward(rewards[i:], gamma) for i in range(len(rewards))]
                 # values = meta_value_network(torch.cat((states_var,task_configs),1))
                 criterion = nn.MSELoss()
-                value_loss.append(criterion(pred_rs,target_values))
+                value_loss.append(criterion(reward_decoder,target_values))
 
             meta_value_network_optim.zero_grad()
             task_config_network_optim.zero_grad()
@@ -94,24 +95,24 @@ def main():
 
             for i in range(TASK_NUMS):
                 states, actions, rewards, _, _ = roll_out(None, task_list[i], HORIZON, None, reset=True)
-                task_config = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
+                dyn_encoder = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
                                                 task_config_network) # 1,z_dim
 
                 # pred_rs = get_predicted_rewards(torch.Tensor(pre_states[i]).cuda(), torch.Tensor(pre_actions[i]).cuda(),
                 #                                 task_config.repeat(pre_states[i].shape[0], 1),
                 #                                 meta_value_network, do_grad=True)
                 # # ===> should be resample
-                states,actions,rewards,is_done,final_state, log_softmax_actions = roll_out(actor_network, task_list[i], HORIZON, task_config, reset=True)
+                states,actions,rewards,is_done,final_state, log_softmax_actions = roll_out(actor_network, task_list[i], HORIZON, dyn_encoder, reset=True)
                 # logp_action 30,2
 
                 # random_actions = [one_hot_action_sample(task_list[i]) for _ in range(n_sample)]
-                n_t = HORIZON//2
+                n_t = len(states)//2
                 st = np.concatenate([states[:n_t]]*n_sample,axis=0) # t*n,stat_dim
                 ac = np.asarray([[0,1]]*n_t+[[1,0]]*n_t) # t*n,2
                 # t*n,1
                 baseline_ = get_predicted_rewards(torch.from_numpy(st).cuda(),
                                                  torch.Tensor(ac).cuda(), # must use Tensor to transform to float
-                                                 task_config.repeat(n_t*n_sample, 1), meta_value_network, do_grad=False)
+                                                 dyn_encoder.repeat(n_t*n_sample, 1), meta_value_network, do_grad=False)
                 baseline = baseline_.detach().view(-1, n_sample)
                 baseline = torch.mean(baseline, dim=-1) # t
                 # calculate qs

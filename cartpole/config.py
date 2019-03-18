@@ -12,6 +12,7 @@ Z_DIM = 16
 actor_dim = 64
 task_dim = 64
 value_dim = 64
+vae_dim = 64
 task_resample_freq = 500
 vae_report_freq = 100
 actor_report_freq = 20
