@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from config import *
 import numpy as np
+from cartpole import CartPoleEnv
+
 class ActorNetwork(nn.Module):
 
     def __init__(self,input_size,hidden_size,action_size):
@@ -111,6 +113,13 @@ class TaskConfigNetwork(nn.Module):
         # Decode hidden state of last time step
         out = self.fc(out[:, -1, :])
         return out
+
+def resample_task():
+    task_list = [CartPoleEnv(np.random.uniform(L_MIN, L_MAX)) for task in range(TASK_NUMS)]
+    task_lengths = [task.length for task in task_list]
+    print(("task length:", task_lengths))
+    [task.reset() for task in task_list]
+    return task_list
 
 def roll_out(actor_network,task,sample_nums, z, reset=False):
     """
