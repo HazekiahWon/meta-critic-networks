@@ -4,25 +4,11 @@
 # All Rights Reserved
 #-------------------------------------
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import Variable
-import matplotlib.pyplot as plt
-import numpy as np
-import math
-import random
-import os
 from cartpole import CartPoleEnv
 import time
 from collections import deque
 from utils import *
 from config import *
-
-
-
-
-
 def main():
 
     # task_embedding + dynamics
@@ -46,8 +32,8 @@ def main():
     #     task_config_network.load_state_dict(torch.load("task_config_network_cartpole.pkl"))
     #     print("load task config network success")
     # optim instances for two nets
-    meta_value_network_optim = torch.optim.Adam(meta_value_network.parameters(),lr=0.005)
-    task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=0.005) # not used?
+    meta_value_network_optim = torch.optim.Adam(meta_value_network.parameters(),lr=vae_lr)
+    task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=vae_lr) # not used?
     actor_network_optim = torch.optim.Adam(actor_network.parameters(), lr=0.01)
 
     # multiple tasks, can randomizing environments by sending randomized args, initialize all tasks
