@@ -44,7 +44,7 @@ class DynamicsEmb(nn.Module):
         self.conv2 = nn.Conv1d(hidden_size, hidden_size, k, padding=pad)
         self.conv3 = nn.Conv1d(hidden_size, hidden_size, k, padding=pad) # 1,hidden_size,t
         self.conv4 = nn.Conv1d(hidden_size, output_size, 1)
-        # self.pool = nn.AvgPool1d(timestep-pad*2)
+
         # self.fc1 = nn.Linear(input_size, hidden_size)
         # self.fc2 = nn.Linear(hidden_size, hidden_size)
         # self.fc3 = nn.Linear(hidden_size, hidden_size)
@@ -58,11 +58,12 @@ class DynamicsEmb(nn.Module):
         # out = self.fc4(out) #
         out = self.conv4(out)
         out = torch.mean(out, dim=-1)
-        # out = self.pool(out) # 1,output_size
+
         # out = F.relu(self.fc1(x))
         # out = F.relu(self.fc2(out))
         # out = F.relu(self.fc3(out))
         # out = self.fc4(out)
+        # out = torch.mean(out, dim=1)
         return out
 
 class VAE(nn.Module):

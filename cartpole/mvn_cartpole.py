@@ -45,16 +45,6 @@ def main():
 
     for episode in range(EPISODE):
         # ----------------- Training ------------------
-
-        if (episode+1) % 10 ==0 : # sample another batch of tasks
-            # renew the tasks
-            task_list = [CartPoleEnv(np.random.uniform(L_MIN,L_MAX)) for task in range(TASK_NUMS)]
-            task_lengths = [task.length for task in task_list]
-            print(("task length:",task_lengths))
-            [task.reset() for task in task_list]
-
-
-
         print(f'train VAE.')
         loss_buffer = deque(maxlen=20)
 
@@ -63,6 +53,13 @@ def main():
             # actor_loss = list()
             value_loss = list()
             start= time.time()
+
+            if (step + 1) % 100 == 0:  # sample another batch of tasks
+                # renew the tasks
+                task_list = [CartPoleEnv(np.random.uniform(L_MIN, L_MAX)) for task in range(TASK_NUMS)]
+                task_lengths = [task.length for task in task_list]
+                print(("task length:", task_lengths))
+                [task.reset() for task in task_list]
 
             for i in range(TASK_NUMS):
                 states, actions, rewards, _, _ = roll_out(None, task_list[i], SAMPLE_NUMS, None, reset=True)
@@ -91,7 +88,7 @@ def main():
             m = np.mean(list(loss_buffer))
             if step%20==0:
                 print(f'step {step} takes {time.time() - start} sec, with recloss={m}.')
-            if m <1.: break
+            if m <15.: break
             else: step += 1
         print('Finish VAE.')
 

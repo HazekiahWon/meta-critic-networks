@@ -10,8 +10,8 @@ task_nlayer = 3
 
 Z_DIM = 16
 actor_dim = 64
-task_dim = 128
-value_dim = 128
+task_dim = 64
+value_dim = 64
 vae_lr = 0.003
 n_sample = 2
 gamma = .99
