@@ -39,18 +39,35 @@ class MetaValueNetwork(nn.Module):
         return out
 
 class DynamicsEmb(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, k, timestep):
+    def __init__(self, input_size, hidden_size, output_size, emb_dim, z_dim, k, stoch):
         super(DynamicsEmb, self).__init__()
+        self.stoch = stoch
         pad = k//2
         self.conv1 = nn.Conv1d(input_size, hidden_size, k, padding=pad)
         self.conv2 = nn.Conv1d(hidden_size, hidden_size, k, padding=pad)
         self.conv3 = nn.Conv1d(hidden_size, hidden_size, k, padding=pad) # 1,hidden_size,t
         self.conv4 = nn.Conv1d(hidden_size, output_size, 1)
+        self._enc_mu = torch.nn.Linear(emb_dim, z_dim)
+        self._enc_log_sigma = torch.nn.Linear(emb_dim, z_dim)
 
         # self.fc1 = nn.Linear(input_size, hidden_size)
         # self.fc2 = nn.Linear(hidden_size, hidden_size)
         # self.fc3 = nn.Linear(hidden_size, hidden_size)
         # self.fc4 = nn.Linear(hidden_size, output_size)
+
+    def _sample_latent(self, h_enc):
+        """
+        Return the latent normal sample z ~ N(mu, sigma^2)
+        """
+        mu = self._enc_mu(h_enc)
+        log_sigma = self._enc_log_sigma(h_enc)
+        sigma = torch.exp(log_sigma)
+        std_z = torch.from_numpy(np.random.normal(0, 1, size=sigma.size())).float()
+
+        self.z_mean = mu
+        self.z_sigma = sigma
+
+        return mu + sigma * Variable(std_z, requires_grad=False).cuda()  # Reparameterization trick
 
     def forward(self, x):
         out = F.relu(self.conv1(x))
@@ -66,34 +83,23 @@ class DynamicsEmb(nn.Module):
         # out = F.relu(self.fc3(out))
         # out = self.fc4(out)
         # out = torch.mean(out, dim=1)
+        if self.stoch:
+            out = self._sample_latent(out)
         return out
 
 class VAE(nn.Module):
-    def __init__(self, encoder, decoder, emb_dim, z_dim):
+    def __init__(self, encoder, decoder):
         super(VAE, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
-        self._enc_mu = torch.nn.Linear(emb_dim, z_dim)
-        self._enc_log_sigma = torch.nn.Linear(emb_dim, z_dim)
 
-    def _sample_latent(self, h_enc):
-        """
-        Return the latent normal sample z ~ N(mu, sigma^2)
-        """
-        mu = self._enc_mu(h_enc)
-        log_sigma = self._enc_log_sigma(h_enc)
-        sigma = torch.exp(log_sigma)
-        std_z = torch.from_numpy(np.random.normal(0, 1, size=sigma.size())).float()
-
-        self.z_mean = mu
-        self.z_sigma = sigma
-
-        return mu + sigma * Variable(std_z, requires_grad=False)  # Reparameterization trick
-
-    def forward(self, state):
-        h_enc = self.encoder(state)
-        z = self._sample_latent(h_enc)
-        return self.decoder(z)
+    def forward(self, states, actions):
+        z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
+                                     self.encoder)  # 1,z_dim
+        pred_return = get_predicted_rewards(states, actions,
+                                            z.repeat(states.shape[0], 1),
+                                            self.decoder, do_grad=True)
+        return pred_return
 
 class TaskConfigNetwork(nn.Module):
 

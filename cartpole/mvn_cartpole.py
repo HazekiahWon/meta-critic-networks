@@ -12,16 +12,17 @@ from config import *
 def main():
 
     # task_embedding + dynamics
-    meta_value_network = MetaValueNetwork(input_size = STATE_DIM+ACTION_DIM+Z_DIM,hidden_size = value_dim,output_size = 1)
-    task_config_network = DynamicsEmb(input_size=STATE_DIM*2+ACTION_DIM,
+    reward_decoder = MetaValueNetwork(input_size = STATE_DIM+ACTION_DIM+Z_DIM,hidden_size = value_dim,output_size = 1)
+    dyn_encoder = DynamicsEmb(input_size=STATE_DIM*2+ACTION_DIM,
                                       hidden_size=task_dim,
-                                      output_size=Z_DIM,
+                                      output_size=vae_dim,
+                              emb_dim=vae_dim, z_dim=Z_DIM,
                                       k=5,
-                                      timestep=HORIZON)
+                                      stoch=stochastic_encoder)
     actor_network = ActorNetwork(STATE_DIM + Z_DIM, actor_dim, ACTION_DIM)
 
-    meta_value_network.cuda()
-    task_config_network.cuda()
+    reward_decoder.cuda()
+    dyn_encoder.cuda()
     actor_network.cuda()
 
     # load params
@@ -32,8 +33,8 @@ def main():
     #     task_config_network.load_state_dict(torch.load("task_config_network_cartpole.pkl"))
     #     print("load task config network success")
     # optim instances for two nets
-    meta_value_network_optim = torch.optim.Adam(meta_value_network.parameters(),lr=vae_lr)
-    task_config_network_optim = torch.optim.Adam(task_config_network.parameters(),lr=vae_lr) # not used?
+    meta_value_network_optim = torch.optim.Adam(reward_decoder.parameters(),lr=vae_lr)
+    task_config_network_optim = torch.optim.Adam(dyn_encoder.parameters(),lr=vae_lr) # not used?
     actor_network_optim = torch.optim.Adam(actor_network.parameters(), lr=0.01)
     # task_list = resample_task()
     for episode in range(EPISODE):
@@ -54,24 +55,26 @@ def main():
             for i in range(TASK_NUMS):
                 states, actions, rewards, _, _ = roll_out(None, task_list[i], HORIZON, None, reset=True)
 
-                dyn_encoder = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
-                                                task_config_network) # 1,z_dim
-
-                reward_decoder = get_predicted_rewards(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda(),
-                                                dyn_encoder.repeat(states.shape[0], 1),
-                                                meta_value_network, do_grad=True)
-                vae = VAE(dyn_encoder, reward_decoder, vae_dim, Z_DIM)
+                # latent_z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
+                #                                 task_config_network) # 1,z_dim
+                #
+                # pred_return = get_predicted_rewards(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda(),
+                #                                 latent_z.repeat(states.shape[0], 1),
+                #                                 meta_value_network, do_grad=True)
+                vae = VAE(dyn_encoder, reward_decoder)
+                vae.cuda()
+                pred_return = vae(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda())
                 target_values = torch.Tensor(seq_reward2go(rewards, gamma)).view(-1,1).cuda() #[dis_reward(rewards[i:], gamma) for i in range(len(rewards))]
                 # values = meta_value_network(torch.cat((states_var,task_configs),1))
                 criterion = nn.MSELoss()
-                value_loss.append(criterion(reward_decoder,target_values))
+                value_loss.append(criterion(pred_return,target_values))
 
             meta_value_network_optim.zero_grad()
             task_config_network_optim.zero_grad()
             rec_loss = torch.mean(torch.stack(value_loss))
             rec_loss.backward()
-            opt_loss(meta_value_network_optim, meta_value_network)
-            opt_loss(task_config_network_optim, task_config_network)
+            opt_loss(meta_value_network_optim, reward_decoder)
+            opt_loss(task_config_network_optim, dyn_encoder)
 
             # step += 1
             if len(loss_buffer)==vae_report_freq: loss_buffer.popleft()
@@ -79,7 +82,7 @@ def main():
             m = np.mean(list(loss_buffer))
             if step%vae_report_freq==0:
                 print(f'step {step} takes {time.time() - start} sec, with recloss={m}.')
-            if m <15.: break
+            if m <vae_thresh: break
             else: step += 1
         print('Finish VAE.')
         print('Train policy.')
@@ -95,14 +98,14 @@ def main():
 
             for i in range(TASK_NUMS):
                 states, actions, rewards, _, _ = roll_out(None, task_list[i], HORIZON, None, reset=True)
-                dyn_encoder = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
-                                                task_config_network) # 1,z_dim
+                latent_z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
+                                                dyn_encoder) # 1,z_dim
 
                 # pred_rs = get_predicted_rewards(torch.Tensor(pre_states[i]).cuda(), torch.Tensor(pre_actions[i]).cuda(),
                 #                                 task_config.repeat(pre_states[i].shape[0], 1),
                 #                                 meta_value_network, do_grad=True)
                 # # ===> should be resample
-                states,actions,rewards,is_done,final_state, log_softmax_actions = roll_out(actor_network, task_list[i], HORIZON, dyn_encoder, reset=True)
+                states,actions,rewards,is_done,final_state, log_softmax_actions = roll_out(actor_network, task_list[i], HORIZON, latent_z, reset=True)
                 # logp_action 30,2
 
                 # random_actions = [one_hot_action_sample(task_list[i]) for _ in range(n_sample)]
@@ -112,7 +115,7 @@ def main():
                 # t*n,1
                 baseline_ = get_predicted_rewards(torch.from_numpy(st).cuda(),
                                                  torch.Tensor(ac).cuda(), # must use Tensor to transform to float
-                                                 dyn_encoder.repeat(n_t*n_sample, 1), meta_value_network, do_grad=False)
+                                                 latent_z.repeat(n_t*n_sample, 1), reward_decoder, do_grad=False)
                 baseline = baseline_.detach().view(-1, n_sample)
                 baseline = torch.mean(baseline, dim=-1) # t
                 # calculate qs
@@ -151,7 +154,7 @@ def main():
                     for test_epi in range(10): # test for 10 epochs and takes the average
                         states, actions, rewards, _, _ = roll_out(None, test_task, HORIZON, None, reset=True)
                         z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
-                                                        task_config_network)  # 1,z_dim
+                                                        dyn_encoder)  # 1,z_dim
                         state = test_task.reset()
                         for test_step in range(200): # rollout for 200 steps
 
@@ -170,8 +173,8 @@ def main():
         
         if (episode+1) % 10 == 0 :
             # Save meta value network
-            torch.save(meta_value_network.state_dict(),"meta_value_network_cartpole.pkl")
-            torch.save(task_config_network.state_dict(),"task_config_network_cartpole.pkl")
+            torch.save(reward_decoder.state_dict(),"meta_value_network_cartpole.pkl")
+            torch.save(dyn_encoder.state_dict(),"task_config_network_cartpole.pkl")
             print(("save networks for episode:",episode))
 
 if __name__ == '__main__':
