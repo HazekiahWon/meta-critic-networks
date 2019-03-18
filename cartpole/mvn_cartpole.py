@@ -99,7 +99,7 @@ class TaskConfigNetwork(nn.Module):
         out = self.fc(out[:, -1, :])
         return out
 
-def roll_out(actor_network,task,sample_nums):
+def roll_out(actor_network,task,sample_nums, z):
     """
     sample a sequence of time steps
     :param actor_network:
@@ -112,12 +112,14 @@ def roll_out(actor_network,task,sample_nums):
     rewards = []
     is_done = False
     state = task.state # ?
+    actions_logp = list()
     result = 0
     for j in range(sample_nums):
         states.append(state)
         if actor_network is None: action = task.action_space.sample()
         else:
-            log_softmax_action = actor_network(Variable(torch.Tensor([state])).cuda())
+            log_softmax_action = get_action_logp(torch.Tensor([state]), z.unsqueeze(0), actor_network)
+            actions_logp.append(log_softmax_action)
             softmax_action = torch.exp(log_softmax_action)
             action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0]) # sample from cat distri
         one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
@@ -139,8 +141,10 @@ def roll_out(actor_network,task,sample_nums):
             #print("result:",result)
             break
 
-
-    return torch.Tensor(states),torch.Tensor(actions),rewards,is_done,torch.Tensor(final_state)
+    if actor_network is None:
+        return torch.Tensor(states),torch.Tensor(actions),rewards,is_done,torch.Tensor(final_state)
+    else: return torch.Tensor(states),torch.Tensor(actions),rewards,is_done,torch.Tensor(final_state), \
+                 torch.stack(actions_logp, dim=0)
 
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
@@ -152,6 +156,27 @@ def discount_reward(r, gamma,final_r):
 
 def dis_reward(rs, gamma):
     return np.sum(rs*np.cumproduct([1]+[gamma]*(len(rs)-1)))
+
+def get_dyn_embedding(s,a,sp, network):
+    pre_data_samples = torch.cat(  # s,a,s
+        (s,a,sp), dim=1)  # t-1,10
+    # sas - z
+    return network(Variable(pre_data_samples).cuda())
+
+def get_predicted_rewards(s,a,z, network):
+    value_inputs = torch.cat(
+        (s,a,z), dim=-1)  # t,22
+    return network(Variable(value_inputs).cuda())  # for vae loss
+
+def get_action_logp(s,z, network):
+    actor_inputs = torch.cat((s,z), dim=1)  # sz - a
+    return network(Variable(actor_inputs).cuda())  # why input the state sequence
+
+def opt_loss(optim, loss, network, max_norm=0.5):
+    optim.zero_grad()  # ?
+    loss.backward()
+    torch.nn.utils.clip_grad_norm(network.parameters(), max_norm)
+    optim.step()
 
 def main():
     # Define dimensions of the networks
@@ -212,7 +237,7 @@ def main():
         # can use multiprocessing
         for i in range(TASK_NUMS):
             # currently we sample from the action space, because the actor requires dynamics embedding which we for now does not know
-            states,actions,rewards,_,_ = roll_out(None,task_list[i],SAMPLE_NUMS)
+            states,actions,rewards,_,_ = roll_out(None,task_list[i],SAMPLE_NUMS, None)
             pre_states.append(states)
             pre_actions.append(actions)
             pre_rewards.append(rewards)
@@ -222,71 +247,36 @@ def main():
             actor_loss = list()
             value_loss = list()
             for i in range(TASK_NUMS):
-                # init task config [1, sample_nums,task_config] task_config size=3
-                pre_data_samples = torch.cat( # s,a,s
-                    (pre_states[i][:-1], # t-1,4
-                     pre_actions[i][:-1], # t-1,2
-                     pre_states[i][1:]),dim=1) # t-1,10
-                # sas - z
-                task_config = task_config_network(Variable(pre_data_samples).cuda())
 
-                # states,actions,rewards,is_done,final_state = roll_out(actor_network,task_list[i],SAMPLE_NUMS)
-                final_r = 0
-                # if not is_done:
-                # saz - r
-                value_inputs = torch.cat(
-                    (pre_states[i], pre_actions[i], task_config.repeat(SAMPLE_NUMS, axis=0)), dim=-1) # t,22
-                pred_rs = meta_value_network(value_inputs) # for vae loss
-                # value_inputs = torch.cat(
-                #     (pre_states[i][-1], pre_actions[i][-1], task_config), dim=-1
-                # ).unsqueeze(0)
-                    # given s,t, the meta-critic predicts a vale
-                    # final_r = meta_value_network(value_inputs).cpu().data.numpy()[0]
+                task_config = get_dyn_embedding(pre_states[i][:-1], pre_actions[i][:-1], pre_states[i][1:],
+                                                task_config_network)
 
-
-                # states_var = Variable(states).cuda() # state sequence
-                # actions_var = Variable(actions).cuda()
+                pred_rs = get_predicted_rewards(pre_states[i], pre_actions[i], task_config.repeat(SAMPLE_NUMS, axis=0),
+                                                meta_value_network)
                 # ===> should be resampled
-                actor_inputs = torch.cat((pre_states[i],task_config.repeat(SAMPLE_NUMS, axis=0)), dim=1) # sz - a
-                log_softmax_actions = actor_network(actor_inputs) # why input the state sequence
+                states,actions,rewards,is_done,final_state, log_softmax_actions = roll_out(actor_network,task_list[i],SAMPLE_NUMS, task_config)
                 # randomly sample to get a baseline
-                random_actions = None
+
                 n_sample = 10
                 gamma = .99
-                value_inputs = torch.cat(
-                    (pre_states[i][0].repeat(n_sample, axis=0),random_actions), dim=1
-                )
-                vs = meta_value_network(value_inputs).detach() # why state sequence now
+                random_actions = [task_list[i].action_space.sample() for _ in range(n_sample)]
+                baseline = get_predicted_rewards(torch.from_numpy([states[0]]*n_sample), torch.from_numpy(random_actions),
+                                                 task_config.repeat(n_sample, axis=0), meta_value_network)
                 # calculate qs
                 # qs = Variable(torch.Tensor(discount_reward(rewards,0.99,final_r))).cuda()
-                qs = dis_reward(rewards, gamma)
-                advantages = qs - vs
+                ret = dis_reward(rewards, gamma)
+                advantages = ret-baseline
                 # why is there multiplied by actions_var
+                actions_var = Variable(actions).cuda()
                 actor_loss.append(- torch.mean(torch.sum(log_softmax_actions*actions_var,1)* advantages)) #+ entropy #+ actor_criterion(actor_y_samples,target_y)
-
-
-
-                # train value network
-
-
 
                 target_values = [dis_reward(rewards[i:], gamma) for i in range(len(rewards))]
                 # values = meta_value_network(torch.cat((states_var,task_configs),1))
                 criterion = nn.MSELoss()
                 value_loss.append(criterion(pred_rs,target_values))
-            # train actor network
-            actor_network_optim.zero_grad()  # ?
-            actor_network_loss = torch.mean(torch.stack(tuple(actor_loss)))
-            actor_network_loss.backward()
-            torch.nn.utils.clip_grad_norm(actor_network.parameters(), 0.5)
-            actor_network_optim.step()
 
-            meta_value_network_optim.zero_grad()
-            meta_value_network_loss = torch.mean(torch.stack(tuple(value_loss)))
-            meta_value_network_loss.backward()
-            torch.nn.utils.clip_grad_norm(meta_value_network.parameters(),0.5)
-
-            meta_value_network_optim.step()
+            opt_loss(actor_network_optim, torch.mean(torch.stack(tuple(actor_loss))), actor_network)
+            opt_loss(meta_value_network_optim, torch.mean(torch.stack(tuple(value_loss))), meta_value_network)
                 
         # train actor network
 
@@ -302,8 +292,7 @@ def main():
                     for test_epi in range(10): # test for 10 epochs and takes the average
                         state = test_task.reset()
                         for test_step in range(200): # rollout for 200 steps
-                            softmax_action = torch.exp(actor_network_list[i](Variable(torch.Tensor([state])).cuda()))
-                            #print(softmax_action.data)
+                            softmax_action = torch.exp(actor_network(Variable(torch.from_numpy([state])).cuda()))
                             action = np.argmax(softmax_action.cpu().data.numpy()[0])
                             next_state,reward,done,_ = test_task.step(action)
                             result += reward
