@@ -214,9 +214,7 @@ def get_action_logp(s,z, network, do_grad=False):
     if do_grad: actor_inputs = Variable(actor_inputs)
     return network(actor_inputs)  # why input the state sequence
 
-def opt_loss(optim, loss, network, max_norm=0.5):
-    optim.zero_grad()  # ?
-    loss.backward()
+def opt_loss(optim, network, max_norm=0.5):
     torch.nn.utils.clip_grad_norm(network.parameters(), max_norm)
     optim.step()
 
@@ -327,9 +325,14 @@ def main():
             ac_loss = torch.mean(torch.stack(actor_loss))
             tmp = torch.stack(value_loss)
             rec_loss = torch.mean(tmp)
-            opt_loss(actor_network_optim, ac_loss, actor_network)
-            opt_loss(meta_value_network_optim, rec_loss, meta_value_network)
-            opt_loss(task_config_network_optim, ac_loss+rec_loss, task_config_network)
+            actor_network_optim.zero_grad()
+            meta_value_network_optim.zero_grad()
+            task_config_network_optim.zero_grad()
+            ac_loss.backward()
+            rec_loss.backward()
+            opt_loss(actor_network_optim, actor_network)
+            opt_loss(meta_value_network_optim, meta_value_network)
+            opt_loss(task_config_network_optim, task_config_network)
 
             if (step + 1) % 100 == 0:
                 for i in range(TASK_NUMS):
