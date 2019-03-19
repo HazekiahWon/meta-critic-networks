@@ -17,7 +17,7 @@ class ActorNetwork(nn.Module):
     def forward(self,x):
         out = F.relu(self.fc1(x))
         out = F.relu(self.fc2(out))
-        out = F.log_softmax(self.fc3(out))
+        out = F.log_softmax(self.fc3(out), dim=-1)
         return out
 
 class MetaValueNetwork(nn.Module):
