@@ -46,61 +46,32 @@ class RBase(FCPrototype): # s,z
     def __init__(self):
         super(RBase, self).__init__((STATE_DIM,Z_DIM), value_dim, 1, None, 0)
 
-class ActorNetwork(nn.Module):
+class DynEmb(FCPrototype): # sas
+    def __init__(self):
+        super(DynEmb, self).__init__((STATE_DIM,ACTION_DIM,STATE_DIM), task_dim, vae_dim, None, 2)
 
-    def __init__(self,hidden_size,action_size):
-        super(ActorNetwork, self).__init__()
-        self.pre_s = nn.Linear(STATE_DIM, fusion_dim)
-        self.pre_z = nn.Linear(Z_DIM, fusion_dim)
-        self.fc1 = nn.Linear(fusion_dim*2,hidden_size)
-        self.fc2 = nn.Linear(hidden_size,hidden_size)
-        self.fc3 = nn.Linear(hidden_size,action_size)
+        self._enc_mu = torch.nn.Linear(vae_dim, Z_DIM)
+        self._enc_log_sigma = torch.nn.Linear(vae_dim, Z_DIM)
 
-    def forward(self,s,z):
-        pro_s = nonlinearity(self.pre_s(s))
-        pro_z = nonlinearity(self.pre_z(z))
-        x = torch.cat((pro_s, pro_z), dim=-1)
-        out = nonlinearity(self.fc1(x))
-        out = nonlinearity(self.fc2(out))
-        out = F.log_softmax(self.fc3(out), dim=-1)
-        return out
 
-class TransNet(nn.Module):
-    """
-    given state,action,z, output next state
-    """
-    def __init__(self,hidden_size,output_size):
-        super(TransNet, self).__init__()
-        self.pre_s = nn.Linear(STATE_DIM, fusion_dim)
-        self.pre_a = nn.Linear(ACTION_DIM, fusion_dim)
-        self.pre_z = nn.Linear(Z_DIM, fusion_dim)
-        self.fc1 = nn.Linear(fusion_dim*3,hidden_size)
-        self.fc2 = nn.Linear(hidden_size,hidden_size)
-        self.fc3 = nn.Linear(hidden_size, hidden_size)
-        self.fc4 = nn.Linear(hidden_size,output_size)
+    def _sample_latent(self, h_enc):
+        """
+        Return the latent normal sample z ~ N(mu, sigma^2)
+        """
+        mu = self._enc_mu(h_enc)
+        log_sigma = self._enc_log_sigma(h_enc)
+        sigma = torch.exp(log_sigma)
+        std_z = torch.from_numpy(np.random.normal(0, 1, size=sigma.size())).float()
 
-    def forward(self,s,a,z):
-        pro_s = nonlinearity(self.pre_s(s))
-        pro_a = nonlinearity(self.pre_a(a))
-        pro_z = nonlinearity(self.pre_z(z))
-        x = torch.cat((pro_s,pro_a, pro_z),dim=-1)
-        out = nonlinearity(self.fc1(x))
-        out = nonlinearity(self.fc2(out))
-        out = nonlinearity(self.fc3(out))
-        out = self.fc4(out)
-        return out
+        self.z_mean = mu
+        self.z_sigma = sigma
 
-class RewardBaseline(nn.Module):
-    def __init__(self,input_size,hidden_size,output_size):
-        super(RewardBaseline, self).__init__()
-        self.fc1 = nn.Linear(input_size,hidden_size)
-        self.fc3 = nn.Linear(hidden_size,output_size)
-        # self.fc2 = nn.Linear(hidden_size, hidden_size)
+        return mu + sigma * Variable(std_z, requires_grad=False).cuda()  # Reparameterization trick
 
-    def forward(self,x):
-        out = nonlinearity(self.fc1(x))
-        # out = nonlinearity(self.fc2(out))
-        out = self.fc3(out)
+    def forward(self, s, a, sp):
+        out = super(DynEmb, self).forward(s,a,sp) # n, vaedim
+        out = self._sample_latent(out) # n,zdim
+        out = torch.mean(out, dim=0, keepdim=True)
         return out
 
 class DynamicsEmb(nn.Module):

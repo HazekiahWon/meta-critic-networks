@@ -13,21 +13,13 @@ from tensorboardX import SummaryWriter
 import os
 def main():
 
-    # task_embedding + dynamics
-    # nstate_decoder = TransNet(hidden_size = value_dim, output_size = STATE_DIM)
-    # dyn_encoder = DynamicsEmb(hidden_size=task_dim,
-    #                                   output_size=vae_dim,
-    #                           emb_dim=vae_dim, z_dim=Z_DIM,
-    #                                   k=5,
-    #                                   stoch=stochastic_encoder)
-    # return_baseline = RewardBaseline(input_size=STATE_DIM+Z_DIM, hidden_size=value_dim, output_size=1)
-    # actor_network = ActorNetwork(actor_dim, ACTION_DIM)
     nstate_decoder = Trans()
-    dyn_encoder = DynamicsEmb(hidden_size=task_dim,
-                              output_size=vae_dim,
-                              emb_dim=vae_dim, z_dim=Z_DIM,
-                              k=5,
-                              stoch=stochastic_encoder)
+    # dyn_encoder = DynamicsEmb(hidden_size=task_dim,
+    #                           output_size=vae_dim,
+    #                           emb_dim=vae_dim, z_dim=Z_DIM,
+    #                           k=5,
+    #                           stoch=stochastic_encoder)
+    dyn_encoder = DynEmb()
     return_baseline = RBase()
     actor_network = Actor()
     vae = VAE(dyn_encoder, nstate_decoder)
@@ -189,7 +181,7 @@ def main():
         if use_baseline:
             bl_loss = torch.mean(torch.stack(value_loss))
             return_bl_optim.zero_grad()
-            overall_loss = ac_loss+bl_loss
+            overall_loss = ac_loss+5*bl_loss
             writer.add_scalar('actor/critic_loss', bl_loss, step)
         else: overall_loss = ac_loss
 
@@ -213,7 +205,7 @@ def main():
                     double_check = 0
 
 
-        if (step+1) % task_resample_freq == 0:
+        if (step+1) % policy_task_resample_freq == 0:
             print('='*25+' validation '+'='*25)
             results = list()
             for i in range(TASK_NUMS):
