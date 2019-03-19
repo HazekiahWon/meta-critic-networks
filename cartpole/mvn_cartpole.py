@@ -14,16 +14,15 @@ import os
 def main():
 
     # task_embedding + dynamics
-    nstate_decoder = TransNet(input_size =STATE_DIM + ACTION_DIM + Z_DIM, hidden_size = value_dim, output_size = STATE_DIM)
-    dyn_encoder = DynamicsEmb(input_size=STATE_DIM*2+ACTION_DIM,
-                                      hidden_size=task_dim,
+    nstate_decoder = TransNet(hidden_size = value_dim, output_size = STATE_DIM)
+    dyn_encoder = DynamicsEmb(hidden_size=task_dim,
                                       output_size=vae_dim,
                               emb_dim=vae_dim, z_dim=Z_DIM,
                                       k=5,
                                       stoch=stochastic_encoder)
     return_baseline = RewardBaseline(input_size=STATE_DIM+Z_DIM, hidden_size=value_dim, output_size=1)
     return_baseline.cuda()
-    actor_network = ActorNetwork(STATE_DIM + Z_DIM, actor_dim, ACTION_DIM)
+    actor_network = ActorNetwork(actor_dim, ACTION_DIM)
     vae = VAE(dyn_encoder, nstate_decoder)
     vae.cuda()
 
@@ -66,21 +65,21 @@ def main():
             task_list = resample_task()
 
         for i in range(TASK_NUMS):
-            states, actions, rewards, _ = roll_out(None, task_list[i], HORIZON, None, reset=True, to_cuda=True)
+            states, actions, rewards, _ = roll_out(None, task_list[i], HORIZON, None, reset=True, to_cuda=True) # cuda
             # states = states[:-1]
-            pred_nstate,latent_z = vae(states[:-2], actions[:-1]) # n,state_dim
+            pred_nstate,latent_z = vae(states[:-2], actions[:-1]) # cuda
             target_nstate = states[1:-1]
             criterion = nn.MSELoss()
-            state_loss.append(criterion(pred_nstate,target_nstate))
+            state_loss.append(criterion(pred_nstate,target_nstate)) # cuda
             latent_z = latent_z.detach()
-            cur_return_pred = get_predicted_rewards(states, latent_z.repeat(states.size(0), 1), return_baseline)
+            cur_return_pred = get_predicted_rewards(states, latent_z.repeat(states.size(0), 1), return_baseline) #cuda
 
             ########## bellman backup
-            # nex_return_pred = cur_return_pred[1:]  # t,1
-            # rewards = torch.Tensor(rewards).view(-1, 1).cuda()
-            # td_target = rewards + gamma * nex_return_pred  # t
+            nex_return_pred = cur_return_pred[1:]  # t,1
+            rewards = torch.Tensor(rewards).view(-1, 1).cuda()
+            td_target = rewards + gamma * nex_return_pred  # t
             ##########################
-            td_target = torch.Tensor(rewards).cuda()#torch.Tensor(seq_reward2go(rewards, gamma)).cuda()
+            # td_target = torch.Tensor(rewards).cuda()#torch.Tensor(seq_reward2go(rewards, gamma)).cuda()
             value_loss.append(criterion(td_target, cur_return_pred[:-1]))
             if i == 0:
                 writer.add_histogram('VAE/target_return', td_target, step)
@@ -91,15 +90,17 @@ def main():
         rec_loss = torch.mean(torch.stack(state_loss))
 
         if use_baseline:
+            return_bl_optim.zero_grad()
             bl_loss = torch.mean(torch.stack(value_loss))
             overall_loss = rec_loss+bl_loss
+            writer.add_scalar('VAE/baseline_loss', bl_loss, step)
         else: overall_loss = rec_loss
 
         overall_loss.backward()
         opt_loss(meta_value_network_optim, nstate_decoder)
         opt_loss(task_config_network_optim, dyn_encoder)
         opt_loss(return_bl_optim, return_baseline)
-        writer.add_scalar('VAE/baseline_loss', bl_loss, step)
+
         writer.add_scalar('VAE/reconstruction_loss', rec_loss, step)
         # step += 1
         if len(loss_buffer)==vae_report_freq: loss_buffer.popleft()
@@ -222,6 +223,7 @@ def main():
                         softmax_action = torch.exp(logp).cuda()
                         action = np.argmax(softmax_action.cpu().data.numpy()[0])
                         next_state,reward,done,_ = test_task.step(action)
+                        # test_task.render()
                         result += reward
                         state = next_state
                         if done:

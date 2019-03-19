@@ -9,6 +9,7 @@ ACTION_DIM = 2 # cat
 task_nlayer = 3
 
 Z_DIM = 16
+fusion_dim = 16
 actor_dim = 64
 task_dim = 64
 value_dim = 64
@@ -20,7 +21,7 @@ vae_lr = 0.003
 n_sample = 2
 gamma = .95
 stochastic_encoder = True
-vae_thresh = 1e-4+0.2
+vae_thresh = 1e-4+1
 STEP = 50000
 HORIZON = 30 #5,10,20
 TEST_SAMPLE_NUMS = 5

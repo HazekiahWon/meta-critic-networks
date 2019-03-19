@@ -10,13 +10,18 @@ from cartpole import CartPoleEnv
 nonlinearity = F.leaky_relu
 class ActorNetwork(nn.Module):
 
-    def __init__(self,input_size,hidden_size,action_size):
+    def __init__(self,hidden_size,action_size):
         super(ActorNetwork, self).__init__()
-        self.fc1 = nn.Linear(input_size,hidden_size)
+        self.pre_s = nn.Linear(STATE_DIM, fusion_dim)
+        self.pre_z = nn.Linear(Z_DIM, fusion_dim)
+        self.fc1 = nn.Linear(fusion_dim*2,hidden_size)
         self.fc2 = nn.Linear(hidden_size,hidden_size)
         self.fc3 = nn.Linear(hidden_size,action_size)
 
-    def forward(self,x):
+    def forward(self,s,z):
+        pro_s = nonlinearity(self.pre_s(s))
+        pro_z = nonlinearity(self.pre_z(z))
+        x = torch.cat((pro_s, pro_z), dim=-1)
         out = nonlinearity(self.fc1(x))
         out = nonlinearity(self.fc2(out))
         out = F.log_softmax(self.fc3(out), dim=-1)
@@ -26,14 +31,21 @@ class TransNet(nn.Module):
     """
     given state,action,z, output next state
     """
-    def __init__(self,input_size,hidden_size,output_size):
+    def __init__(self,hidden_size,output_size):
         super(TransNet, self).__init__()
-        self.fc1 = nn.Linear(input_size,hidden_size)
+        self.pre_s = nn.Linear(STATE_DIM, fusion_dim)
+        self.pre_a = nn.Linear(ACTION_DIM, fusion_dim)
+        self.pre_z = nn.Linear(Z_DIM, fusion_dim)
+        self.fc1 = nn.Linear(fusion_dim*3,hidden_size)
         self.fc2 = nn.Linear(hidden_size,hidden_size)
         self.fc3 = nn.Linear(hidden_size, hidden_size)
         self.fc4 = nn.Linear(hidden_size,output_size)
 
-    def forward(self,x):
+    def forward(self,s,a,z):
+        pro_s = nonlinearity(self.pre_s(s))
+        pro_a = nonlinearity(self.pre_a(a))
+        pro_z = nonlinearity(self.pre_z(z))
+        x = torch.cat((pro_s,pro_a, pro_z),dim=-1)
         out = nonlinearity(self.fc1(x))
         out = nonlinearity(self.fc2(out))
         out = nonlinearity(self.fc3(out))
@@ -54,11 +66,13 @@ class RewardBaseline(nn.Module):
         return out
 
 class DynamicsEmb(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, emb_dim, z_dim, k, stoch):
+    def __init__(self, hidden_size, output_size, emb_dim, z_dim, k, stoch):
         super(DynamicsEmb, self).__init__()
         self.stoch = stoch
         pad = k//2
-        self.conv1 = nn.Conv1d(input_size, hidden_size, k, padding=pad)
+        self.pre_s = nn.Linear(STATE_DIM, fusion_dim)
+        self.pre_a = nn.Linear(ACTION_DIM, fusion_dim)
+        self.conv1 = nn.Conv1d(fusion_dim*3, hidden_size, k, padding=pad)
         self.conv2 = nn.Conv1d(hidden_size, hidden_size, k, padding=pad)
         self.conv3 = nn.Conv1d(hidden_size, hidden_size, k, padding=pad) # 1,hidden_size,t
         self.conv4 = nn.Conv1d(hidden_size, output_size, 1)
@@ -84,7 +98,13 @@ class DynamicsEmb(nn.Module):
 
         return mu + sigma * Variable(std_z, requires_grad=False).cuda()  # Reparameterization trick
 
-    def forward(self, x):
+    def forward(self, s, a, sp):
+        pro_s = nonlinearity(self.pre_s(s))
+        pro_a = nonlinearity(self.pre_a(a))
+        pro_sp = nonlinearity(self.pre_s(sp))
+        #### concat the above in the same dimension
+        x = torch.cat((pro_s,pro_a,pro_sp), dim=-1).transpose(-2,-1).unsqueeze(0) # 1,n,sha*3
+        #### concat into a new dimension
         out = nonlinearity(self.conv1(x))
         out = out+nonlinearity(self.conv2(out))
         out = out+nonlinearity(self.conv3(out))
@@ -219,20 +239,17 @@ def seq_reward2go(rs, gamma):
 def get_dyn_embedding(s,a,sp, network):
     """
     return with batch size
-    :param s:
-    :param a:
-    :param sp:
+    :param s: b,s_dim
+    :param a: b,a_dim
+    :param sp: b,s_dim
     :param network:
     :return:
     """
-    pre_data_samples = torch.cat(  # s,a,s
-        (s,a,sp), dim=1).transpose(0,1).unsqueeze(0)  # 1,10,t-1
+    # pre_data_samples = torch.cat(  # s,a,s
+    #     (s,a,sp), dim=1).transpose(0,1).unsqueeze(0)  # 1,10,t-1
     # sas - z
-    try:
-        out = network(Variable(pre_data_samples).cuda())
-    except:
-        print(pre_data_samples.size())
 
+    out = network(s, a, sp)
     return out
 
 def get_predicted_rewards(s,z, network, do_grad=False):
@@ -244,15 +261,15 @@ def get_predicted_rewards(s,z, network, do_grad=False):
 
 def get_predicted_nstate(s,a,z, network, do_grad=False):
 
-    value_inputs = torch.cat(
-        (s,a,z), dim=-1)  # t,22
-    if do_grad: value_inputs = Variable(value_inputs)
-    return network(value_inputs)  # for vae loss
+    # value_inputs = torch.cat(
+    #     (s,a,z), dim=-1)  # t,22
+
+    return network(s,a,z)  # for vae loss
 
 def get_action_logp(s,z, network, do_grad=False):
-    actor_inputs = torch.cat((s,z), dim=1)  # sz - a
-    if do_grad: actor_inputs = Variable(actor_inputs)
-    return network(actor_inputs)  # why input the state sequence
+    # actor_inputs = torch.cat((s,z), dim=1)  # sz - a
+    # if do_grad: actor_inputs = Variable(actor_inputs)
+    return network(s,z)  # why input the state sequence
 
 def opt_loss(optim, network, max_norm=0.5):
     torch.nn.utils.clip_grad_norm(network.parameters(), max_norm)
