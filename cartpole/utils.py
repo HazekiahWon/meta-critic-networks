@@ -36,22 +36,22 @@ class FCPrototype(nn.Module):
 
 class Actor(FCPrototype): # s,z
     def __init__(self):
-        super(Actor, self).__init__((STATE_DIM,Z_DIM), actor_dim, ACTION_DIM, lambda x:F.log_softmax(x,dim=-1), 1)
+        super(Actor, self).__init__((STATE_DIM,Z_DIM), actor_hdim, ACTION_DIM, lambda x:F.log_softmax(x, dim=-1), 1)
 
 class Trans(FCPrototype): # s,a,z
     def __init__(self):
-        super(Trans, self).__init__((STATE_DIM,ACTION_DIM,Z_DIM), value_dim, STATE_DIM, None, 2)
+        super(Trans, self).__init__((STATE_DIM,ACTION_DIM,Z_DIM), trans_hdim, STATE_DIM, None, 2)
 
 class RBase(FCPrototype): # s,z
     def __init__(self):
-        super(RBase, self).__init__((STATE_DIM,Z_DIM), value_dim, 1, None, 0)
+        super(RBase, self).__init__((STATE_DIM,Z_DIM), trans_hdim, 1, None, 0)
 
 class DynEmb(FCPrototype): # sas
     def __init__(self):
-        super(DynEmb, self).__init__((STATE_DIM,ACTION_DIM,STATE_DIM), task_dim, vae_dim, None, 2)
+        super(DynEmb, self).__init__((STATE_DIM,ACTION_DIM,STATE_DIM), dynEmb_hdim, gauss_dim, None, 2)
 
-        self._enc_mu = torch.nn.Linear(vae_dim, Z_DIM)
-        self._enc_log_sigma = torch.nn.Linear(vae_dim, Z_DIM)
+        self._enc_mu = torch.nn.Linear(gauss_dim, Z_DIM)
+        self._enc_log_sigma = torch.nn.Linear(gauss_dim, Z_DIM)
 
 
     def _sample_latent(self, h_enc):
