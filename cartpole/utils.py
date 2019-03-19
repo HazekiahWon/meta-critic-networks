@@ -8,6 +8,44 @@ from config import *
 import numpy as np
 from cartpole import CartPoleEnv
 nonlinearity = F.leaky_relu
+class FCPrototype(nn.Module):
+
+    def __init__(self,input_dims, hidden_size, out_size, out_act, nlayer):
+        super(FCPrototype, self).__init__()
+        self.pre_layers = nn.ModuleList([nn.Linear(d, fusion_dim) for d in input_dims])
+
+        fc1 = nn.Linear(fusion_dim*len(self.pre_layers),hidden_size)
+        h_layers = [nn.Linear(hidden_size, hidden_size) for _ in range(nlayer)]
+        self.out_layer = nn.Linear(hidden_size, out_size)
+        self.out_act = out_act
+        self.layers = nn.ModuleList([fc1]+h_layers)
+
+    def forward(self,*inputs):
+        fusion_features = list()
+        for inp,l in zip(inputs,self.pre_layers):
+            fusion_features.append(nonlinearity(l(inp)))
+
+        x = torch.cat(fusion_features, dim=-1)
+        for l in self.layers:
+            x = nonlinearity(l(x))
+
+        out = self.out_layer(x)
+        if self.out_act is not None:
+            return self.out_act(out)
+        else: return out
+
+class Actor(FCPrototype): # s,z
+    def __init__(self):
+        super(Actor, self).__init__((STATE_DIM,Z_DIM), actor_dim, ACTION_DIM, lambda x:F.log_softmax(x,dim=-1), 1)
+
+class Trans(FCPrototype): # s,a,z
+    def __init__(self):
+        super(Trans, self).__init__((STATE_DIM,ACTION_DIM,Z_DIM), value_dim, STATE_DIM, None, 2)
+
+class RBase(FCPrototype): # s,z
+    def __init__(self):
+        super(RBase, self).__init__((STATE_DIM,Z_DIM), value_dim, 1, None, 0)
+
 class ActorNetwork(nn.Module):
 
     def __init__(self,hidden_size,action_size):
@@ -254,10 +292,10 @@ def get_dyn_embedding(s,a,sp, network):
 
 def get_predicted_rewards(s,z, network, do_grad=False):
 
-    value_inputs = torch.cat(
-        (s,z), dim=-1)  # t,22
-    if do_grad: value_inputs = Variable(value_inputs)
-    return network(value_inputs)  # for vae loss
+    # value_inputs = torch.cat(
+    #     (s,z), dim=-1)  # t,22
+    # if do_grad: value_inputs = Variable(value_inputs)
+    return network(s, z)  # for vae loss
 
 def get_predicted_nstate(s,a,z, network, do_grad=False):
 

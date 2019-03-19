@@ -14,21 +14,29 @@ import os
 def main():
 
     # task_embedding + dynamics
-    nstate_decoder = TransNet(hidden_size = value_dim, output_size = STATE_DIM)
+    # nstate_decoder = TransNet(hidden_size = value_dim, output_size = STATE_DIM)
+    # dyn_encoder = DynamicsEmb(hidden_size=task_dim,
+    #                                   output_size=vae_dim,
+    #                           emb_dim=vae_dim, z_dim=Z_DIM,
+    #                                   k=5,
+    #                                   stoch=stochastic_encoder)
+    # return_baseline = RewardBaseline(input_size=STATE_DIM+Z_DIM, hidden_size=value_dim, output_size=1)
+    # actor_network = ActorNetwork(actor_dim, ACTION_DIM)
+    nstate_decoder = Trans()
     dyn_encoder = DynamicsEmb(hidden_size=task_dim,
-                                      output_size=vae_dim,
+                              output_size=vae_dim,
                               emb_dim=vae_dim, z_dim=Z_DIM,
-                                      k=5,
-                                      stoch=stochastic_encoder)
-    return_baseline = RewardBaseline(input_size=STATE_DIM+Z_DIM, hidden_size=value_dim, output_size=1)
-    return_baseline.cuda()
-    actor_network = ActorNetwork(actor_dim, ACTION_DIM)
+                              k=5,
+                              stoch=stochastic_encoder)
+    return_baseline = RBase()
+    actor_network = Actor()
     vae = VAE(dyn_encoder, nstate_decoder)
-    vae.cuda()
 
+    return_baseline.cuda()
     nstate_decoder.cuda()
     dyn_encoder.cuda()
     actor_network.cuda()
+    vae.cuda()
 
     # load params
     # if os.path.exists("meta_value_network_cartpole.pkl"):
