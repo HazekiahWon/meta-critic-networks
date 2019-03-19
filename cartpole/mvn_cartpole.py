@@ -14,16 +14,20 @@ import os
 def main():
 
     # task_embedding + dynamics
-    reward_decoder = MetaValueNetwork(input_size = STATE_DIM+ACTION_DIM+Z_DIM,hidden_size = value_dim,output_size = 1)
+    nstate_decoder = TransNet(input_size =STATE_DIM + ACTION_DIM + Z_DIM, hidden_size = value_dim, output_size = STATE_DIM)
     dyn_encoder = DynamicsEmb(input_size=STATE_DIM*2+ACTION_DIM,
                                       hidden_size=task_dim,
                                       output_size=vae_dim,
                               emb_dim=vae_dim, z_dim=Z_DIM,
                                       k=5,
                                       stoch=stochastic_encoder)
+    return_baseline = RewardBaseline(input_size=STATE_DIM+Z_DIM, hidden_size=value_dim, output_size=1)
+    return_baseline.cuda()
     actor_network = ActorNetwork(STATE_DIM + Z_DIM, actor_dim, ACTION_DIM)
+    vae = VAE(dyn_encoder, nstate_decoder)
+    vae.cuda()
 
-    reward_decoder.cuda()
+    nstate_decoder.cuda()
     dyn_encoder.cuda()
     actor_network.cuda()
 
@@ -35,58 +39,73 @@ def main():
     #     task_config_network.load_state_dict(torch.load("task_config_network_cartpole.pkl"))
     #     print("load task config network success")
     # optim instances for two nets
-    meta_value_network_optim = torch.optim.Adam(reward_decoder.parameters(),lr=vae_lr)
+    meta_value_network_optim = torch.optim.Adam(nstate_decoder.parameters(),lr=vae_lr)
     task_config_network_optim = torch.optim.Adam(dyn_encoder.parameters(),lr=vae_lr) # not used?
-    actor_network_optim = torch.optim.Adam(actor_network.parameters(), lr=0.01)
-    os.makedirs(logdir, exist_ok=True)
+    actor_network_optim = torch.optim.Adam(actor_network.parameters(), lr=0.001)
+    return_bl_optim = torch.optim.Adam(return_baseline.parameters(),lr=0.001)
     expname = os.path.join(logdir, time.strftime('exp_%y%m%d_%H%M%S', time.localtime()))
+    os.makedirs(expname, exist_ok=True)
+    save_meta(expname)
     writer = SummaryWriter(log_dir=expname)
     # task_list = resample_task()
 
     # ----------------- Training ------------------
     print(f'train VAE.')
     loss_buffer = deque(maxlen=vae_report_freq)
-
+    horizon = HORIZON  # to continuously increase the hardship of the trajectories.
+    gamma = pow(0.05, 1. / horizon)
     step = 0
     start = time.time()
     while True:
         # actor_loss = list()
+        state_loss = list()
         value_loss = list()
-
 
         if step % task_resample_freq == 0:  # sample another batch of tasks
             # renew the tasks
             task_list = resample_task()
 
         for i in range(TASK_NUMS):
-            states, actions, rewards, _, _ = roll_out(None, task_list[i], HORIZON, None, reset=True)
-
-            # latent_z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
-            #                                 task_config_network) # 1,z_dim
-            #
-            # pred_return = get_predicted_rewards(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda(),
-            #                                 latent_z.repeat(states.shape[0], 1),
-            #                                 meta_value_network, do_grad=True)
-            vae = VAE(dyn_encoder, reward_decoder)
-            vae.cuda()
-            pred_return = vae(torch.Tensor(states).cuda(), torch.Tensor(actions).cuda())
-            target_values = torch.Tensor(seq_reward2go(rewards, gamma)).view(-1,1).cuda() #[dis_reward(rewards[i:], gamma) for i in range(len(rewards))]
-            # values = meta_value_network(torch.cat((states_var,task_configs),1))
+            states, actions, rewards, _ = roll_out(None, task_list[i], HORIZON, None, reset=True, to_cuda=True)
+            # states = states[:-1]
+            pred_nstate,latent_z = vae(states[:-2], actions[:-1]) # n,state_dim
+            target_nstate = states[1:-1]
             criterion = nn.MSELoss()
-            value_loss.append(criterion(pred_return,target_values))
+            state_loss.append(criterion(pred_nstate,target_nstate))
+            latent_z = latent_z.detach()
+            cur_return_pred = get_predicted_rewards(states, latent_z.repeat(states.size(0), 1), return_baseline)
+
+            ########## bellman backup
+            # nex_return_pred = cur_return_pred[1:]  # t,1
+            # rewards = torch.Tensor(rewards).view(-1, 1).cuda()
+            # td_target = rewards + gamma * nex_return_pred  # t
+            ##########################
+            td_target = torch.Tensor(rewards).cuda()#torch.Tensor(seq_reward2go(rewards, gamma)).cuda()
+            value_loss.append(criterion(td_target, cur_return_pred[:-1]))
+            if i == 0:
+                writer.add_histogram('VAE/target_return', td_target, step)
+                writer.add_histogram('VAE/pred_return', cur_return_pred[:-1], step)
 
         meta_value_network_optim.zero_grad()
         task_config_network_optim.zero_grad()
-        rec_loss = torch.mean(torch.stack(value_loss))
-        rec_loss.backward()
-        opt_loss(meta_value_network_optim, reward_decoder)
-        opt_loss(task_config_network_optim, dyn_encoder)
+        rec_loss = torch.mean(torch.stack(state_loss))
 
+        if use_baseline:
+            bl_loss = torch.mean(torch.stack(value_loss))
+            overall_loss = rec_loss+bl_loss
+        else: overall_loss = rec_loss
+
+        overall_loss.backward()
+        opt_loss(meta_value_network_optim, nstate_decoder)
+        opt_loss(task_config_network_optim, dyn_encoder)
+        opt_loss(return_bl_optim, return_baseline)
+        writer.add_scalar('VAE/baseline_loss', bl_loss, step)
         writer.add_scalar('VAE/reconstruction_loss', rec_loss, step)
         # step += 1
         if len(loss_buffer)==vae_report_freq: loss_buffer.popleft()
-        loss_buffer.append(rec_loss.item())
+        loss_buffer.append(overall_loss.item())
         m = np.mean(list(loss_buffer))
+        # print(f'step {step} takes {time.time() - start} sec, with recloss={rec_loss}.')
         if step%vae_report_freq==0:
             print(f'step {step} takes {time.time() - start} sec, with recloss={m}.')
             start = time.time()
@@ -98,37 +117,48 @@ def main():
     loss_buffer = deque(maxlen=actor_report_freq)
     task_list = resample_task()
     val_cnt = 0
-    horizon = HORIZON # to continuously increase the hardship of the trajectories.
+
+    double_check = 0
     for step in range(STEP):
         actor_loss = list()
+        value_loss = list()
         rets = list()
         # value_loss = list()
         start = time.time()
 
         for i in range(TASK_NUMS):
-            states, actions, rewards, _, _ = roll_out(None, task_list[i], horizon, None, reset=True)
+            # obtain z
+            states, actions, _, _ = roll_out(None, task_list[i], horizon, None, reset=True)
+            states = states[:-1]
             latent_z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
                                             dyn_encoder) # 1,z_dim
-            states,actions,rewards,is_done,final_state, log_softmax_actions = roll_out(actor_network, task_list[i], horizon, latent_z, reset=True)
+            # the actor-critic pipeline
+            states,actions,rewards,is_done,log_softmax_actions = roll_out(actor_network, task_list[i], horizon, latent_z, reset=True)
+            # rewards = torch.from_numpy(rewards)
             n_t = len(states)
-            ret = torch.Tensor(seq_reward2go(rewards[:n_t], gamma)).cuda()
+            disc_return = torch.Tensor(seq_reward2go(rewards, gamma)).cuda()
             rets.append(np.sum(rewards))
             if use_baseline:
-                st = np.concatenate([states[:n_t]]*n_sample,axis=0) # t*n,stat_dim
-                ac = np.asarray([[0,1]]*n_t+[[1,0]]*n_t) # t*n,2
-                # t*n,1
-                baseline_ = get_predicted_rewards(torch.from_numpy(st).cuda(),
-                                                 torch.Tensor(ac).cuda(), # must use Tensor to transform to float
-                                                 latent_z.repeat(n_t*n_sample, 1), reward_decoder, do_grad=False)
-                baseline = baseline_.detach().view(-1, n_sample)
-                baseline = torch.mean(baseline, dim=-1) # t
-                advantages = ret - baseline.cuda()
-                # writer.add_scalar('actor/baseline', baseline[0], step)
-                # writer.add_scalar('actor/real_return', ret[0], step)
-                # writer.add_scalar('actor/advantage', advantages[0], step)
-                # writer.add_histogram('actor/baseline', step)
+                # st = np.concatenate([states[:n_t]]*n_sample,axis=0) # t*n,stat_dim
+                # ac = np.asarray([[0,1]]*n_t+[[1,0]]*n_t) # t*n,2
+                # # t*n,1
+                # baseline_ = get_predicted_rewards(torch.from_numpy(st).cuda(),
+                #                                  torch.Tensor(ac).cuda(), # must use Tensor to transform to float
+                #                                  latent_z.repeat(n_t*n_sample, 1), nstate_decoder, do_grad=False)
+                # baseline = baseline_.detach().view(-1, n_sample)
+                # baseline = torch.mean(baseline, dim=-1) # t
+                # advantages = disc_return - baseline.cuda()
+                cur_return_pred = get_predicted_rewards(states, latent_z.repeat(states.size(0), 1), return_baseline)
+                nex_return_pred = cur_return_pred[1:] # t,1
+                rewards = torch.Tensor(rewards).view(-1,1).cuda()
+                td_target = rewards+gamma*nex_return_pred # t
+                td_error = td_target-cur_return_pred[:-1] # bellman error
+                td_error = td_error.squeeze(-1)
+                criterion = nn.MSELoss()
+                value_loss.append(criterion(td_target, cur_return_pred[:-1]))
+                advantages = td_error
             else:
-                advantages = ret
+                advantages = disc_return
                 # writer.add_scalar('actor/real_return', ret[0], step)
 
             # why is there multiplied by actions_var
@@ -146,8 +176,16 @@ def main():
         ac_loss = torch.mean(torch.stack(actor_loss))
         avg_ret = np.mean(rets)
         actor_network_optim.zero_grad()
-        ac_loss.backward()
         # rec_loss.backward()
+        if use_baseline:
+            bl_loss = torch.mean(torch.stack(value_loss))
+            return_bl_optim.zero_grad()
+            overall_loss = ac_loss+bl_loss
+            writer.add_scalar('actor/critic_loss', bl_loss, step)
+        else: overall_loss = ac_loss
+
+        overall_loss.backward()
+        opt_loss(return_bl_optim, return_baseline)
         opt_loss(actor_network_optim, actor_network)
 
         if len(loss_buffer)==actor_report_freq: loss_buffer.popleft()
@@ -159,8 +197,11 @@ def main():
         if (step+1) % actor_report_freq == 0:
             print(f'step {step} with avg return {m}.')
             if m>double_horizon_threshold*horizon:
-                horizon += HORIZON
-                print(f'step {step} horizon={horizon}')
+                double_check += 1
+                if double_check==3:
+                    horizon += HORIZON
+                    print(f'step {step} horizon={horizon}')
+                    double_check = 0
 
 
         if (step+1) % task_resample_freq == 0:
@@ -170,7 +211,8 @@ def main():
                 result = 0
                 test_task = CartPoleEnv(length = task_list[i].length)
                 for test_epi in range(10): # test for 10 epochs and takes the average
-                    states, actions, rewards, _, _ = roll_out(None, test_task, horizon, None, reset=True)
+                    states, actions, _, _ = roll_out(None, test_task, horizon, None, reset=True)
+                    states = states[:-1]
                     z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
                                                     dyn_encoder)  # 1,z_dim
                     state = test_task.reset()
@@ -190,7 +232,7 @@ def main():
             print(f'average return {val_res} for {TASK_NUMS} tasks.')
             print('=' * 25 + ' validation ' + '=' * 25)
 
-            torch.save(reward_decoder.state_dict(),os.path.join(expname, f"meta_value_network_cartpole_{step}.pkl"))
+            torch.save(nstate_decoder.state_dict(),os.path.join(expname, f"meta_value_network_cartpole_{step}.pkl"))
             torch.save(dyn_encoder.state_dict(),os.path.join(expname, f"task_config_network_cartpole_{step}.pkl"))
             print("save networks")
             task_list = resample_task() # resample

@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+import config
+import os
 from config import *
 import numpy as np
 from cartpole import CartPoleEnv
-
+nonlinearity = F.leaky_relu
 class ActorNetwork(nn.Module):
 
     def __init__(self,input_size,hidden_size,action_size):
@@ -15,27 +17,40 @@ class ActorNetwork(nn.Module):
         self.fc3 = nn.Linear(hidden_size,action_size)
 
     def forward(self,x):
-        out = F.relu(self.fc1(x))
-        out = F.relu(self.fc2(out))
+        out = nonlinearity(self.fc1(x))
+        out = nonlinearity(self.fc2(out))
         out = F.log_softmax(self.fc3(out), dim=-1)
         return out
 
-class MetaValueNetwork(nn.Module):
+class TransNet(nn.Module):
     """
-    given state,action,z, output reward
+    given state,action,z, output next state
     """
     def __init__(self,input_size,hidden_size,output_size):
-        super(MetaValueNetwork, self).__init__()
+        super(TransNet, self).__init__()
         self.fc1 = nn.Linear(input_size,hidden_size)
         self.fc2 = nn.Linear(hidden_size,hidden_size)
         self.fc3 = nn.Linear(hidden_size, hidden_size)
         self.fc4 = nn.Linear(hidden_size,output_size)
 
     def forward(self,x):
-        out = F.relu(self.fc1(x))
-        out = F.relu(self.fc2(out))
-        out = F.relu(self.fc3(out))
+        out = nonlinearity(self.fc1(x))
+        out = nonlinearity(self.fc2(out))
+        out = nonlinearity(self.fc3(out))
         out = self.fc4(out)
+        return out
+
+class RewardBaseline(nn.Module):
+    def __init__(self,input_size,hidden_size,output_size):
+        super(RewardBaseline, self).__init__()
+        self.fc1 = nn.Linear(input_size,hidden_size)
+        self.fc3 = nn.Linear(hidden_size,output_size)
+        # self.fc2 = nn.Linear(hidden_size, hidden_size)
+
+    def forward(self,x):
+        out = nonlinearity(self.fc1(x))
+        # out = nonlinearity(self.fc2(out))
+        out = self.fc3(out)
         return out
 
 class DynamicsEmb(nn.Module):
@@ -70,17 +85,17 @@ class DynamicsEmb(nn.Module):
         return mu + sigma * Variable(std_z, requires_grad=False).cuda()  # Reparameterization trick
 
     def forward(self, x):
-        out = F.relu(self.conv1(x))
-        out = out+F.relu(self.conv2(out))
-        out = out+F.relu(self.conv3(out))
+        out = nonlinearity(self.conv1(x))
+        out = out+nonlinearity(self.conv2(out))
+        out = out+nonlinearity(self.conv3(out))
         # out = torch.transpose(out, -1, -2) # 1,t,hidden
         # out = self.fc4(out) #
         out = self.conv4(out)
         out = torch.mean(out, dim=-1)
 
-        # out = F.relu(self.fc1(x))
-        # out = F.relu(self.fc2(out))
-        # out = F.relu(self.fc3(out))
+        # out = nonlinearity(self.fc1(x))
+        # out = nonlinearity(self.fc2(out))
+        # out = nonlinearity(self.fc3(out))
         # out = self.fc4(out)
         # out = torch.mean(out, dim=1)
         if self.stoch:
@@ -96,10 +111,10 @@ class VAE(nn.Module):
     def forward(self, states, actions):
         z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
                                      self.encoder)  # 1,z_dim
-        pred_return = get_predicted_rewards(states, actions,
+        nstate = get_predicted_nstate(states, actions,
                                             z.repeat(states.shape[0], 1),
                                             self.decoder, do_grad=True)
-        return pred_return
+        return nstate,z
 
 class TaskConfigNetwork(nn.Module):
 
@@ -119,6 +134,12 @@ class TaskConfigNetwork(nn.Module):
         # Decode hidden state of last time step
         out = self.fc(out[:, -1, :])
         return out
+def save_meta(save_dir):
+    with open(os.path.join(save_dir, 'meta.txt'), 'w') as f:
+        for k in dir(config):
+            if k.startswith('_'): continue
+            f.write(f'{k}={getattr(config, k)}\n')
+        f.write(memo)
 
 def resample_task():
     task_list = [CartPoleEnv(np.random.uniform(L_MIN, L_MAX)) for task in range(TASK_NUMS)]
@@ -127,7 +148,7 @@ def resample_task():
     [task.reset() for task in task_list]
     return task_list
 
-def roll_out(actor_network,task,sample_nums, z, reset=False):
+def roll_out(actor_network,task,sample_nums, z, reset=False, to_cuda=True):
     """
     sample a sequence of time steps
     :param actor_network:
@@ -154,7 +175,7 @@ def roll_out(actor_network,task,sample_nums, z, reset=False):
         one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
         next_state,reward,done,_ = task.step(action)
         #task.result += reward
-        fix_reward = -10 if done else 1
+        fix_reward = -10 if done else 1 # this will cause total reward to be smaller than 0
         actions.append(one_hot_action)
         rewards.append(fix_reward)
         final_state = next_state
@@ -169,11 +190,15 @@ def roll_out(actor_network,task,sample_nums, z, reset=False):
             task.reset()
             #print("result:",result)
             break
-
+    states.append(final_state)
+    s,a,r = torch.Tensor(states), torch.Tensor(actions), np.asarray(rewards)
+    if to_cuda: s,a = s.cuda(),a.cuda()
     if actor_network is None:
-        return torch.Tensor(states),torch.Tensor(actions),rewards,is_done,torch.Tensor(final_state)
-    else: return torch.Tensor(states),torch.Tensor(actions),rewards,is_done,torch.Tensor(final_state), \
-                 torch.cat(actions_logp, dim=0)
+        return s,a,r,is_done
+    else:
+        logp = torch.cat(actions_logp, dim=0)
+        if to_cuda: logp = logp.cuda()
+        return s,a,r,is_done,logp
 
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
@@ -184,7 +209,9 @@ def discount_reward(r, gamma,final_r):
     return discounted_r
 
 def dis_reward(rs, gamma):
-    return np.sum(rs*np.cumproduct([1]+[gamma]*(len(rs)-1)))
+    raw_ret = np.sum(rs*np.cumproduct([1]+[gamma]*(len(rs)-1)))
+    if use_baseline: return raw_ret
+    else: return max(0., raw_ret)
 
 def seq_reward2go(rs, gamma):
     return [dis_reward(rs[i:], gamma) for i in range(len(rs))]
@@ -208,7 +235,14 @@ def get_dyn_embedding(s,a,sp, network):
 
     return out
 
-def get_predicted_rewards(s,a,z, network, do_grad=False):
+def get_predicted_rewards(s,z, network, do_grad=False):
+
+    value_inputs = torch.cat(
+        (s,z), dim=-1)  # t,22
+    if do_grad: value_inputs = Variable(value_inputs)
+    return network(value_inputs)  # for vae loss
+
+def get_predicted_nstate(s,a,z, network, do_grad=False):
 
     value_inputs = torch.cat(
         (s,a,z), dim=-1)  # t,22

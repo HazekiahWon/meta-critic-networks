@@ -20,13 +20,12 @@ vae_lr = 0.003
 n_sample = 2
 gamma = .95
 stochastic_encoder = True
-vae_thresh = 13
-TASK_CONFIG_DIM = 3
-EPISODE = 1000
+vae_thresh = 1e-4+0.2
 STEP = 50000
 HORIZON = 30 #5,10,20
 TEST_SAMPLE_NUMS = 5
-use_baseline = False
+use_baseline = True
 
 logdir = 'saved_models'
 double_horizon_threshold = 0.9
+memo = 'pretrain baseline with straight mse, not bellman backup'
