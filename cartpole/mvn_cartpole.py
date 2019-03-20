@@ -165,8 +165,7 @@ def main():
                                                     dyn_encoder)  # 1,z_dim
                     state = test_task.reset()
                     for test_step in range(200): # rollout for 200 steps
-                        step_ret,_ = single_step_rollout(state, z, actor_network, test_task)
-                        next_state,reward,done,_ = step_ret
+                        next_state, reward, done, action, logp = single_step_rollout(state, z, actor_network, test_task)
                         # test_task.render()
                         result += reward
                         state = next_state

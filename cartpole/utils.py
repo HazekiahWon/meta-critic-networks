@@ -205,9 +205,9 @@ def roll_out(actor_network,task,sample_nums, z, reset=False, to_cuda=True):
         states.append(state)
 
         if actor_network is not None:
-            step_ret, action = single_step_rollout(state, z, actor_network, task)
-            next_state, reward, done, _ = step_ret
+            next_state, reward, done, action, logp = single_step_rollout(state, z, actor_network, task)
             one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
+            actions_logp.append(logp)
         else:
             action = task.action_space.sample()
             one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
@@ -238,7 +238,9 @@ def single_step_rollout(state, z, actor_network, test_task):
     logp = get_action_logp(torch.Tensor([state]).cuda(), z, actor_network, do_grad=True)
     softmax_action = torch.exp(logp).cuda()
     action = np.argmax(softmax_action.cpu().data.numpy()[0])
-    return test_task.step(action), action
+
+    next_state,reward,done,_ = test_task.step(action)
+    return next_state, reward, done, action, logp
 
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
