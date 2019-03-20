@@ -163,6 +163,14 @@ class TaskConfigNetwork(nn.Module):
         # Decode hidden state of last time step
         out = self.fc(out[:, -1, :])
         return out
+
+def load_model(net, model_file_path):
+    if os.path.exists(model_file_path):
+        net.load_state_dict(torch.load(model_file_path))
+        print(f'{model_file_path} loaded.')
+
+def save_model(net, model_file_path):
+    torch.save(net.state_dict(), model_file_path)
 def save_meta(save_dir):
     with open(os.path.join(save_dir, 'meta.txt'), 'w') as f:
         for k in dir(config):
@@ -195,25 +203,22 @@ def roll_out(actor_network,task,sample_nums, z, reset=False, to_cuda=True):
     result = 0
     for j in range(sample_nums):
         states.append(state)
-        if actor_network is None: action = task.action_space.sample()
+
+        if actor_network is not None:
+            step_ret, action = single_step_rollout(state, z, actor_network, task)
+            next_state, reward, done, _ = step_ret
+            one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
         else:
-            log_softmax_action = get_action_logp(torch.Tensor([state]).cuda(), z, actor_network, do_grad=True)
-            actions_logp.append(log_softmax_action)
-            softmax_action = torch.exp(log_softmax_action)
-            action = np.random.choice(ACTION_DIM,p=softmax_action.cpu().data.numpy()[0]) # sample from cat distri
-        one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
-        next_state,reward,done,_ = task.step(action)
-        #task.result += reward
+            action = task.action_space.sample()
+            one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
+            next_state, reward, done, _ = task.step(action)
+
         fix_reward = -10 if done else 1 # this will cause total reward to be smaller than 0
         actions.append(one_hot_action)
         rewards.append(fix_reward)
         final_state = next_state
         state = next_state
-        '''
-        if task.result >= 250:
-            task.reset()
-            break
-        '''
+
         if done:
             is_done = True
             task.reset()
@@ -228,6 +233,12 @@ def roll_out(actor_network,task,sample_nums, z, reset=False, to_cuda=True):
         logp = torch.cat(actions_logp, dim=0)
         if to_cuda: logp = logp.cuda()
         return s,a,r,is_done,logp
+
+def single_step_rollout(state, z, actor_network, test_task):
+    logp = get_action_logp(torch.Tensor([state]).cuda(), z, actor_network, do_grad=True)
+    softmax_action = torch.exp(logp).cuda()
+    action = np.argmax(softmax_action.cpu().data.numpy()[0])
+    return test_task.step(action), action
 
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)
@@ -280,12 +291,51 @@ def get_action_logp(s,z, network, do_grad=False):
     # if do_grad: actor_inputs = Variable(actor_inputs)
     return network(s,z)  # why input the state sequence
 
-def opt_loss(optim, network, max_norm=0.5):
+def step_optimizer(optim, network, max_norm=0.5):
     torch.nn.utils.clip_grad_norm(network.parameters(), max_norm)
     optim.step()
+    optim.zero_grad()
+
+def step_optimizers(model_dict, model_optim, model_names):
+    for n in model_names:
+        step_optimizer(model_optim[n],model_dict[n])
 
 def one_hot_action_sample(task):
     a = np.zeros((ACTION_DIM,))
     sam = task.action_space.sample()
     a[sam] = 1
     return a
+class AC():
+    def __init__(self, w):
+        self.loss_weight = w
+
+    @staticmethod
+    def train(states, actions, rewards, latent_z, return_baseline, log_softmax_actions):
+        n_t = len(states)
+        total_rewards = np.sum(rewards)  # no disc
+        disc_return = torch.Tensor(seq_reward2go(rewards, gamma)).cuda()
+
+        cur_return_pred = get_predicted_rewards(states, latent_z.repeat(states.size(0), 1), return_baseline)
+        nex_return_pred = cur_return_pred[1:]  # t,1
+        rewards = torch.Tensor(rewards).view(-1, 1).cuda()
+        td_target = rewards + gamma * nex_return_pred  # t
+        td_error = td_target - cur_return_pred[:-1]  # bellman error
+        td_error = td_error.squeeze(-1)
+        criterion = nn.MSELoss()
+        bellman_error = criterion(td_target, cur_return_pred[:-1])
+        advantages = td_error
+
+        actions_var = Variable(actions).cuda()
+        # if this drops to 0, might well lead to some problem, e.g., the return drop drastically, but is multiplied by 0
+        actions_logp = -torch.sum(log_softmax_actions * actions_var, dim=1)[:n_t] + 1e-4  # n,1
+
+        sudo_loss = torch.sum(actions_logp * advantages.detach(), dim=0)
+
+        return sudo_loss, bellman_error, total_rewards, actions_logp, advantages
+
+    def optimize(self, ac_loss, bl_loss, model_dict, model_opt, model_names, writer, step):
+        overall_loss = ac_loss + self.loss_weight * bl_loss
+        overall_loss.backward()
+        step_optimizers(model_dict, model_opt, model_names)
+        writer.add_scalar('actor/critic_loss', bl_loss, step)
+        writer.add_scalar('actor/actor_loss', ac_loss, step)
