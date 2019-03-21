@@ -13,6 +13,7 @@ fusion_dim = 16
 actor_hdim = 64
 dynEmb_hdim = 64
 trans_hdim = 64
+value_hdim = 64
 gauss_dim = 64
 task_resample_freq = 100
 policy_task_resample_freq = 20
@@ -20,7 +21,7 @@ vae_report_freq = 100
 actor_report_freq = 40
 vae_lr = 0.001
 n_sample = 2
-gamma = .95
+# gamma = .95
 stochastic_encoder = True
 vae_thresh = 1e-2
 STEP = 50000
@@ -30,6 +31,6 @@ use_baseline = True
 
 logdir = 'saved_models'
 double_horizon_threshold = 0.9
-memo = 'pretrain baseline with straight mse, not bellman backup'
+memo = 'testing the algo in single env'
 
 resume_model_dir = None
