@@ -127,7 +127,7 @@ class Multitask(BaseModel):
                 # print("result:",result)
                 break
         states.append(final_state)
-        s, a, r = torch.Tensor(states), torch.Tensor(actions), np.asarray(rewards)
+        s, a, r = torch.Tensor(states), torch.Tensor(actions), reward_scale*np.asarray(rewards)
         if to_cuda: s, a = s.cuda(), a.cuda()
         if actor_network is None:
             return s, a, r, is_done
@@ -233,7 +233,7 @@ class Multitask(BaseModel):
             bl_loss = torch.mean(torch.stack(value_loss))
             self.algo.optimize(ac_loss, bl_loss, self.model_dict, self.model_opt, ('actor_network', 'value_baseline'), self.writer, step)
 
-            avg_ret = np.mean(rets)
+            avg_ret = np.mean(rets)/reward_scale
             if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
             loss_buffer.append(avg_ret.item())
             m = np.mean(list(loss_buffer))
@@ -276,7 +276,7 @@ class Multitask(BaseModel):
                     if done:
                         break
             results.append(result / 10.)  # average for 10 tests
-        val_res = np.mean(results)
+        val_res = np.mean(results)/reward_scale
         self.writer.add_scalar('actor/val_return', val_res, val_cnt)
         print(f'average return {val_res} for {TASK_NUMS} tasks.')
         print('=' * 25 + ' validation ' + '=' * 25)
@@ -352,7 +352,7 @@ class Singletask(BaseModel):
                 # print("result:",result)
                 break
         states.append(final_state)
-        s, a, r = torch.Tensor(states), torch.Tensor(actions), np.asarray(rewards)
+        s, a, r = torch.Tensor(states), torch.Tensor(actions), reward_scale*np.asarray(rewards)
         if to_cuda: s, a = s.cuda(), a.cuda()
         if actor_network is None:
             return s, a, r, is_done
@@ -386,7 +386,7 @@ class Singletask(BaseModel):
             self.algo.optimize(sudo_loss, bellman_error, self.model_dict, self.model_opt,
                                ('actor_network', 'value_baseline'), self.writer, step)
 
-            avg_ret = total_rewards
+            avg_ret = total_rewards/reward_scale
             if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
             loss_buffer.append(avg_ret.item())
             m = np.mean(list(loss_buffer))
@@ -413,10 +413,10 @@ class Singletask(BaseModel):
         results = list()
         for test_epi in range(10):  # test for 10 epochs and takes the average
             states, actions, rewards, is_done, log_softmax_actions = self.roll_out(self.actor_network, self.task,
-                                                                                   horizon, reset=True)
+                                                                                   200, reset=True)
             results.append(np.sum(rewards))
 
-        val_res = np.mean(results)
+        val_res = np.mean(results)/reward_scale
         self.writer.add_scalar('actor/val_return', val_res, val_cnt)
         print(f'average return {val_res} for 10 tests.')
         print('=' * 25 + ' validation ' + '=' * 25)
@@ -429,7 +429,7 @@ class Singletask(BaseModel):
 def main():
     # model = Multitask(algo=A2C(5))
     # model.deploy()
-    model = Singletask(algo=A2C(5), model_lr=(0.001, 5e-3)) # value actor
+    model = Singletask(algo=A2C(1), model_lr=(0.001, 5e-3)) # value actor
     model.deploy()
 
 if __name__ == '__main__':

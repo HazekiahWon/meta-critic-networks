@@ -34,3 +34,4 @@ double_horizon_threshold = 0.9
 memo = 'testing the algo in single env'
 
 resume_model_dir = None
+reward_scale = 0.1
