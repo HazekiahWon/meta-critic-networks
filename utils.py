@@ -14,7 +14,7 @@ def resample_task():
 
 
 
-def single_step_rollout(logp, action, test_task):
+def single_step_rollout(action, test_task):
     # softmax_action = torch.exp(logp).cuda()
     # action = np.argmax(softmax_action.cpu().data.numpy()[0]
     next_state,reward,done,_ = test_task.step(action)

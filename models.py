@@ -74,17 +74,17 @@ class BaseModel():
             self.step_optimizer(self.model_opt[n], self.model_dict[n])
 
 class Multitask(BaseModel):
-    def __init__(self, algo, model_lr=(5e-3,5e-3,5e-3,5e-3)):
+    def __init__(self, env, algo, model_lr=(5e-3,5e-3,5e-3,5e-3)):
         modules = ['nstate_decoder','dyn_encoder','value_baseline','actor_network']
-        super(Multitask, self).__init__(modules, model_lr)
+        super(Multitask, self).__init__(env, modules, model_lr)
         self.algo = algo
 
     def setup_modules(self):
         self.modules = ['nstate_decoder','dyn_encoder','value_baseline','actor_network']
-        self.nstate_decoder = Trans_with_latent()
-        self.dyn_encoder = DynEmb()
-        self.value_baseline = VBase_with_latent()
-        self.actor_network = Actor_with_latent()
+        self.nstate_decoder = Trans_with_latent(self.state_dim, self.action_dim)
+        self.dyn_encoder = DynEmb(self.state_dim, self.action_dim)
+        self.value_baseline = VBase_with_latent(self.state_dim)
+        self.actor_network = GaussianActor_with_latent(self.state_dim, self.action_dim)
         self.vae = VAE(self.dyn_encoder, self.nstate_decoder)
         # send to cuda
         self.value_baseline.cuda()
@@ -95,7 +95,9 @@ class Multitask(BaseModel):
 
         self.defualt_setup()
 
-    def roll_out(self, actor_network, task, sample_nums, z, reset=False, to_cuda=True):
+        self.task = self.env
+
+    def roll_out(self, state, actor_network, task, sample_nums, z, reset=False, to_cuda=True):
         """
         sample a sequence of time steps
         :param actor_network:
@@ -103,30 +105,30 @@ class Multitask(BaseModel):
         :param sample_nums:
         :return:
         """
-        if reset: task.reset()
+        if reset:
+            state = task.reset()
         states = []
         actions = []
         rewards = []
         is_done = False
-        state = task.state  # ?
+        # state = task.state  # ?
         actions_logp = list()
         result = 0
         for j in range(sample_nums):
             states.append(state)
 
             if actor_network is not None:
-                logp = actor_network(torch.Tensor([state]).cuda(), z)
-                next_state, reward, done, action= single_step_rollout(logp, task)
-                one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
+                action, _, logp = actor_network(torch.Tensor([state]).cuda(), z)
+                action = action.cpu().data.numpy()[0]
+                next_state, reward, done = single_step_rollout(action, task)
                 actions_logp.append(logp)
             else:
                 action = task.action_space.sample()
-                one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
+                # one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
                 next_state, reward, done, _ = task.step(action)
 
-            fix_reward = -10 if done else 1  # this will cause total reward to be smaller than 0
-            actions.append(one_hot_action)
-            rewards.append(fix_reward)
+            actions.append(action)
+            rewards.append(reward)
             final_state = next_state
             state = next_state
 
@@ -156,11 +158,12 @@ class Multitask(BaseModel):
             state_loss = list()
             value_loss = list()
 
-            if step % task_resample_freq == 0:  # sample another batch of tasks
-                self.task_list = resample_task()
+            # if step % task_resample_freq == 0:  # sample another batch of tasks
+            #     self.task_list = resample_task()
 
             for i in range(TASK_NUMS):
-                states, actions, rewards, _ = self.roll_out(None, self.task_list[i], HORIZON, None, reset=True,
+                self.reset_cur_task(np.random.randint(len(self.task_ids)))
+                states, actions, rewards, _ = self.roll_out(None, None, self.task, HORIZON, None, reset=True,
                                                        to_cuda=True)  # cuda
                 # states = states[:-1]
                 pred_nstate, latent_z = self.vae(states[:-2], actions[:-1])  # cuda
@@ -212,7 +215,7 @@ class Multitask(BaseModel):
     def train_policy(self):
         print('Train policy.')
         loss_buffer = deque(maxlen=actor_report_freq)
-        task_list = resample_task()
+        # task_list = resample_task()
         val_cnt = 0
         horizon = HORIZON  # to continuously increase the hardship of the trajectories.
         gamma = pow(0.05, 1. / horizon)
@@ -224,14 +227,15 @@ class Multitask(BaseModel):
 
             for i in range(TASK_NUMS):
                 # obtain z and experience data to train the actor
-                states, actions, _, _ = self.roll_out(None, task_list[i], horizon, None, reset=True)
+                task = self.reset_cur_task(np.random.randint(len(self.task_ids)))
+                states, actions, _, _ = self.roll_out(None, None, self.task, horizon, None, reset=True)
                 states = states[:-1]  # to remove the final state
                 latent_z = get_dyn_embedding(states[:-1], actions[:-1], states[1:], self.dyn_encoder)  # 1,z_dim
-                states, actions, rewards, is_done, log_softmax_actions = self.roll_out(self.actor_network, task_list[i], horizon,
+                states, actions, rewards, is_done, log_softmax_actions = self.roll_out(None, self.actor_network, self.task, horizon,
                                                                                   latent_z, reset=True)
 
                 cstate_value = self.value_baseline(states, latent_z.repeat(states.size(0), 1))
-                sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, actions, rewards,
+                sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, rewards,
                                                                                                cstate_value, log_softmax_actions,
                                                                                                gamma)
                 actor_loss.append(sudo_loss)  # + entropy #+ actor_criterion(actor_y_samples,target_y)
@@ -271,17 +275,18 @@ class Multitask(BaseModel):
         results = list()
         for i in range(TASK_NUMS):
             result = 0
-            test_task = CartPoleEnv(
-                length=self.task_list[i].length)  # simply set this to random can test the generalizability
+            # test_task = CartPoleEnv(
+            #     length=self.task_list[i].length)  # simply set this to random can test the generalizability
+            self.reset_cur_task(np.random.randint(len(self.task_ids)))
             for test_epi in range(10):  # test for 10 epochs and takes the average
-                states, actions, _, _ = self.roll_out(None, test_task, horizon, None, reset=True)
+                states, actions, _, _ = self.roll_out(None, None, self.task, horizon, None, reset=True)
                 states = states[:-1]
                 z = get_dyn_embedding(states[:-1], actions[:-1], states[1:],
                                       self.dyn_encoder)  # 1,z_dim
-                state = test_task.reset()
+                state = self.task.reset()
                 for test_step in range(200):  # rollout for 200 steps
-                    logp = self.actor_network(torch.Tensor([state]).cuda(), z)
-                    next_state, reward, done, action = single_step_rollout(logp, test_task)
+                    action, _, logp = self.actor_network(torch.Tensor([state]).cuda(), z)
+                    next_state, reward, done, action = single_step_rollout(action, self.task)
                     # test_task.render()
                     result += reward
                     state = next_state
@@ -347,7 +352,7 @@ class Singletask(BaseModel):
             if actor_network is not None:
                 action, _, logp = actor_network(torch.Tensor([state]).cuda()) # return cpu version
                 action = action.cpu().data.numpy()[0]
-                next_state, reward, done = single_step_rollout(logp, action, task)
+                next_state, reward, done = single_step_rollout(action, task)
                 # one_hot_action = [int(k == action) for k in range(self.action_dim)]
                 actions_logp.append(logp)
             else:
@@ -440,10 +445,10 @@ class Singletask(BaseModel):
 
 
 def main():
-    env = NormalizedBoxEnv(HalfCheetahDirEnv())
-    # model = Multitask(algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
+    env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
+    model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
-    model = Singletask(env, algo=A2C(1), model_lr=(0.001, 5e-3)) # value actor
+    # model = Singletask(env, algo=A2C(1), model_lr=(1e-3, 1e-3)) # value actor
     model.deploy()
 
 if __name__ == '__main__':

@@ -93,6 +93,10 @@ class GaussianActor(GaussianFCPrototype):
     def __init__(self, STATE_DIM, ACTION_DIM):
         super(GaussianActor, self).__init__((STATE_DIM,), actor_fcs, ACTION_DIM)
 
+class GaussianActor_with_latent(GaussianFCPrototype):
+    def __init__(self, STATE_DIM, ACTION_DIM):
+        super(GaussianActor_with_latent, self).__init__((STATE_DIM,Z_DIM), actor_fcs, ACTION_DIM)
+
 class DynEmb(FCPrototype): # sas
     def __init__(self, STATE_DIM,ACTION_DIM):
         super(DynEmb, self).__init__((STATE_DIM,ACTION_DIM,STATE_DIM), dyn_fcs, gauss_dim, None)

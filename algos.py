@@ -58,3 +58,7 @@ class Entropy:
         ent = -p*logp # n,2
         ent = torch.sum(ent, dim=-1) # n,
         return torch.mean(ent, dim=-1) # average ent for actions
+
+    @staticmethod
+    def gauss_ent(logstd):
+        return torch.sum(logstd + .5 * np.log(2.0 * np.pi * np.e), dim=-1)
