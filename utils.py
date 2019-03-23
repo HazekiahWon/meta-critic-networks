@@ -1,6 +1,4 @@
 from common_imports import *
-import config
-import os
 from config import *
 import numpy as np
 from cartpole import CartPoleEnv
@@ -16,12 +14,11 @@ def resample_task():
 
 
 
-def single_step_rollout(logp, test_task):
-    softmax_action = torch.exp(logp).cuda()
-    action = np.argmax(softmax_action.cpu().data.numpy()[0])
-
+def single_step_rollout(logp, action, test_task):
+    # softmax_action = torch.exp(logp).cuda()
+    # action = np.argmax(softmax_action.cpu().data.numpy()[0]
     next_state,reward,done,_ = test_task.step(action)
-    return next_state, reward, done, action
+    return next_state, reward, done
 
 def discount_reward(r, gamma,final_r):
     discounted_r = np.zeros_like(r)

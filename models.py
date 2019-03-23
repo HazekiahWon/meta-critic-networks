@@ -4,20 +4,29 @@
 # All Rights Reserved
 #-------------------------------------
 
-from cartpole import CartPoleEnv
 import time
 from collections import deque
-from common_imports import *
 from modules import *
-from utils import *
 from algos import *
 from tensorboardX import SummaryWriter
 import os
+import config
+from rlkit.envs.half_cheetah_dir import HalfCheetahDirEnv
+from rlkit.envs.wrappers import NormalizedBoxEnv
+from rlkit.torch import pytorch_util as ptu
 
 class BaseModel():
-    def __init__(self, modules, model_lr):
+    def __init__(self, env, modules, model_lr):
+        self.env = env
+        self.task_ids = env.get_all_task_idx()
+        self.state_dim = env.observation_space.shape[0]
+        self.action_dim = env.action_space.shape[0]
         self.modules = modules
         self.model_lr = {name:lr for name,lr in zip(self.modules,model_lr)}
+
+    def reset_cur_task(self, idx):
+        # idx = np.random.randint(len(self.task_ids))
+        self.env.reset_task(idx)
 
     def defualt_setup(self, memo=None):
         # for the convenience of saving
@@ -56,7 +65,7 @@ class BaseModel():
 
     @staticmethod
     def step_optimizer(optim, network, max_norm=0.5):
-        torch.nn.utils.clip_grad_norm(network.parameters(), max_norm)
+        torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm)
         optim.step()
         optim.zero_grad()
 
@@ -106,7 +115,7 @@ class Multitask(BaseModel):
             states.append(state)
 
             if actor_network is not None:
-                logp = actor_network(torch.Tensor([state]), z)
+                logp = actor_network(torch.Tensor([state]).cuda(), z)
                 next_state, reward, done, action= single_step_rollout(logp, task)
                 one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
                 actions_logp.append(logp)
@@ -181,6 +190,9 @@ class Multitask(BaseModel):
             ######## optimize
             rec_loss = torch.mean(torch.stack(state_loss))
             rec_loss.backward()
+            if rec_loss.cpu().data.numpy()==np.nan:
+                print(state_loss)
+                break
             self.writer.add_scalar('VAE/reconstruction_loss', rec_loss, step)
             self.step_optimizers(('dyn_encoder', 'nstate_decoder'))
 
@@ -268,15 +280,15 @@ class Multitask(BaseModel):
                                       self.dyn_encoder)  # 1,z_dim
                 state = test_task.reset()
                 for test_step in range(200):  # rollout for 200 steps
-                    logp = self.actor_network(torch.Tensor(state), z)
-                    next_state, reward, done, action= single_step_rollout(logp, test_task)
+                    logp = self.actor_network(torch.Tensor([state]).cuda(), z)
+                    next_state, reward, done, action = single_step_rollout(logp, test_task)
                     # test_task.render()
                     result += reward
                     state = next_state
                     if done:
                         break
             results.append(result / 10.)  # average for 10 tests
-        val_res = np.mean(results)/reward_scale
+        val_res = np.mean(results) # this does not require scaling because I use single-step-rollout
         self.writer.add_scalar('actor/val_return', val_res, val_cnt)
         print(f'average return {val_res} for {TASK_NUMS} tasks.')
         print('=' * 25 + ' validation ' + '=' * 25)
@@ -292,26 +304,27 @@ class Multitask(BaseModel):
         self.train_policy()
 
 class Singletask(BaseModel):
-    def __init__(self, algo, model_lr=(5e-3,5e-3)):
+    def __init__(self, env, algo, model_lr=(5e-3,5e-3)):
         modules = ['value_baseline', 'actor_network']
-        super(Singletask, self).__init__(modules, model_lr)
+        super(Singletask, self).__init__(env, modules, model_lr)
         self.algo = algo
 
     def setup_modules(self):
-        self.value_baseline = VBase()
-        self.actor_network = Actor()
+        self.value_baseline = VBase(self.state_dim)
+        self.actor_network = GaussianActor(self.state_dim, self.action_dim)
         # send to cuda
         self.value_baseline.cuda()
         self.actor_network.cuda()
-        # algo
-        # self.algo = A2C(5)
 
-
-        random_choice = np.random.uniform(L_MIN, L_MAX)
+        # random_choice = np.random.uniform(L_MIN, L_MAX)
+        random_choice = np.random.randint(len(self.task_ids))
+        print(f'tasks totaling {len(self.task_ids)}, chose {random_choice}')
         self.defualt_setup(memo=config.memo + f'/n{random_choice}')
-        self.task = CartPoleEnv(random_choice)
+        # self.task = CartPoleEnv(random_choice)
+        self.reset_cur_task(random_choice)
+        self.task = self.env
 
-    def roll_out(self, actor_network, task, sample_nums, reset=False, to_cuda=True):
+    def roll_out(self, state, actor_network, task, sample_nums, reset=False, to_cuda=True):
         """
         sample a sequence of time steps
         :param actor_network:
@@ -319,29 +332,31 @@ class Singletask(BaseModel):
         :param sample_nums:
         :return:
         """
-        if reset: task.reset()
+        if reset:
+            state = task.reset()
         states = []
         actions = []
         rewards = []
         is_done = False
-        state = task.state  # ?
+        # state = task.state  # ?
         actions_logp = list()
         result = 0
         for j in range(sample_nums):
             states.append(state)
 
             if actor_network is not None:
-                logp = actor_network(torch.Tensor([state]).cuda())
-                next_state, reward, done, action = single_step_rollout(logp, task)
-                one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
+                action, _, logp = actor_network(torch.Tensor([state]).cuda()) # return cpu version
+                action = action.cpu().data.numpy()[0]
+                next_state, reward, done = single_step_rollout(logp, action, task)
+                # one_hot_action = [int(k == action) for k in range(self.action_dim)]
                 actions_logp.append(logp)
             else:
                 action = task.action_space.sample()
-                one_hot_action = [int(k == action) for k in range(ACTION_DIM)]
+                # one_hot_action = [int(k == action) for k in range(self.action_dim)]
                 next_state, reward, done, _ = task.step(action)
 
             fix_reward = -10 if done else 1  # this will cause total reward to be smaller than 0
-            actions.append(one_hot_action)
+            actions.append(action)
             rewards.append(fix_reward)
             final_state = next_state
             state = next_state
@@ -371,7 +386,7 @@ class Singletask(BaseModel):
         double_check = 0
         for step in range(STEP):
             # obtain z and experience data to train the actor
-            states, actions, rewards, is_done, log_softmax_actions = self.roll_out(self.actor_network, self.task,
+            states, actions, rewards, is_done, log_softmax_actions = self.roll_out(None, self.actor_network, self.task,
                                                                               horizon, reset=True)
             cstate_value = self.value_baseline(states)
             sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, actions,
@@ -391,16 +406,16 @@ class Singletask(BaseModel):
             loss_buffer.append(avg_ret.item())
             m = np.mean(list(loss_buffer))
             self.writer.add_scalar('actor/avg_return', avg_ret, step)
-            print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
+            # print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
 
-            # if (step + 1) % actor_report_freq == 0:
-            #     print(f'step {step} with avg return {m}.')
-            #     if m > double_horizon_threshold * horizon:
-            #         double_check += 1
-            #         if double_check == 3:
-            #             horizon += HORIZON
-            #             print(f'step {step} horizon={horizon}')
-            #             double_check = 0
+            if (step + 1) % actor_report_freq == 0:
+                print(f'step {step} with avg return {m}.')
+                if m > double_horizon_threshold * horizon:
+                    double_check += 1
+                    if double_check == 3:
+                        horizon += HORIZON
+                        print(f'step {step} horizon={horizon}')
+                        double_check = 0
 
             if (step + 1) % policy_task_resample_freq == 0:
                 self.val_and_save(horizon, val_cnt, step)
@@ -412,7 +427,7 @@ class Singletask(BaseModel):
         print('=' * 25 + ' validation ' + '=' * 25)
         results = list()
         for test_epi in range(10):  # test for 10 epochs and takes the average
-            states, actions, rewards, is_done, log_softmax_actions = self.roll_out(self.actor_network, self.task,
+            states, actions, rewards, is_done, log_softmax_actions = self.roll_out(None, self.actor_network, self.task,
                                                                                    200, reset=True)
             results.append(np.sum(rewards))
 
@@ -427,9 +442,10 @@ class Singletask(BaseModel):
 
 
 def main():
-    # model = Multitask(algo=A2C(5))
+    env = NormalizedBoxEnv(HalfCheetahDirEnv())
+    # model = Multitask(algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
-    model = Singletask(algo=A2C(1), model_lr=(0.001, 5e-3)) # value actor
+    model = Singletask(env, algo=A2C(1), model_lr=(0.001, 5e-3)) # value actor
     model.deploy()
 
 if __name__ == '__main__':

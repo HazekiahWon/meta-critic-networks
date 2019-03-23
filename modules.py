@@ -1,5 +1,5 @@
-from common_imports import *
 from utils import *
+from rlkit.torch.distributions import TanhNormal
 nonlinearity = F.leaky_relu
 
 class FCPrototype(nn.Module):
@@ -28,28 +28,65 @@ class FCPrototype(nn.Module):
             return self.out_act(out)
         else: return out
 
+class GaussianFCPrototype(nn.Module):
+
+    def __init__(self,input_dims, hidden_size, out_size, nlayer):
+        super(GaussianFCPrototype, self).__init__()
+        self.pre_layers = nn.ModuleList([nn.Linear(d, fusion_dim) for d in input_dims])
+
+        fc1 = nn.Linear(fusion_dim*len(self.pre_layers),hidden_size)
+        h_layers = [nn.Linear(hidden_size, hidden_size) for _ in range(nlayer)]
+        self.mean_layer = nn.Linear(hidden_size, out_size)
+        self.logstd_layer = nn.Linear(hidden_size, out_size)
+        self.layers = nn.ModuleList([fc1]+h_layers)
+
+    def forward(self,*inputs):
+        fusion_features = list()
+        for inp,l in zip(inputs,self.pre_layers):
+            fusion_features.append(nonlinearity(l(inp)))
+
+        x = torch.cat(fusion_features, dim=-1)
+        for l in self.layers:
+            x = nonlinearity(l(x))
+
+        mean = self.mean_layer(x)
+        logstd = self.logstd_layer(x)
+        logstd = torch.clamp(logstd, LOGMIN, LOGMAX)
+        std = torch.exp(logstd)
+
+        tanh_normal = TanhNormal(mean.cpu(), std.cpu())
+        action, pre_tanh_value = tanh_normal.rsample(return_pretanh_value=True)
+        logp = tanh_normal.log_prob(action, pre_tanh_value) #
+        logp = logp.sum(dim=1, keepdim=True) # why
+        return action, pre_tanh_value, logp
+
+
 class Actor_with_latent(FCPrototype): # s,z
-    def __init__(self):
+    def __init__(self, STATE_DIM, ACTION_DIM):
         super(Actor_with_latent, self).__init__((STATE_DIM, Z_DIM), actor_hdim, ACTION_DIM, lambda x:F.log_softmax(x, dim=-1), 1)
 
 class Trans_with_latent(FCPrototype): # s,a,z
-    def __init__(self):
+    def __init__(self, STATE_DIM, ACTION_DIM):
         super(Trans_with_latent, self).__init__((STATE_DIM, ACTION_DIM, Z_DIM), trans_hdim, STATE_DIM, None, 2)
 
 class VBase_with_latent(FCPrototype): # s,z
-    def __init__(self):
+    def __init__(self, STATE_DIM):
         super(VBase_with_latent, self).__init__((STATE_DIM, Z_DIM), value_hdim, 1, None, 0)
 
 class VBase(FCPrototype): # s,z
-    def __init__(self):
+    def __init__(self, STATE_DIM):
         super(VBase, self).__init__((STATE_DIM,), value_hdim, 1, None, 0)
 
 class Actor(FCPrototype):
-    def __init__(self):
+    def __init__(self, STATE_DIM, ACTION_DIM):
         super(Actor, self).__init__((STATE_DIM,), actor_hdim, ACTION_DIM, lambda x:F.log_softmax(x, dim=-1), 1)
 
+class GaussianActor(GaussianFCPrototype):
+    def __init__(self, STATE_DIM, ACTION_DIM):
+        super(GaussianActor, self).__init__((STATE_DIM,), actor_hdim, ACTION_DIM, 1)
+
 class DynEmb(FCPrototype): # sas
-    def __init__(self):
+    def __init__(self, STATE_DIM,ACTION_DIM):
         super(DynEmb, self).__init__((STATE_DIM,ACTION_DIM,STATE_DIM), dynEmb_hdim, gauss_dim, None, 2)
 
         self._enc_mu = torch.nn.Linear(gauss_dim, Z_DIM)
