@@ -16,7 +16,7 @@ trans_hdim = 64
 value_hdim = 64
 gauss_dim = 64
 task_resample_freq = 100
-policy_task_resample_freq = 20
+policy_task_resample_freq = 100
 vae_report_freq = 100
 actor_report_freq = 40
 vae_lr = 0.001
@@ -34,6 +34,11 @@ double_horizon_threshold = 0.9
 memo = 'testing the algo in single env'
 
 resume_model_dir = None
-reward_scale = 0.1
+reward_scale = 1.
 LOGMIN = -20
 LOGMAX = 2
+
+actor_fcs = [64,64]
+value_fcs = [64]
+trans_fcs = [64]
+dyn_fcs = [64,64]
