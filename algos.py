@@ -6,7 +6,17 @@ class A2C():
         self.bellman_weight = be_w
         self.ent_weight = ent_w
 
-    def train(self, states, actions, rewards, cstate_value, log_softmax_actions, gamma, entropy_fn=None):
+    def train(self, states, rewards, cstate_value, log_softmax_actions, gamma, entropy_fn=None):
+        """
+        do make sure logp and adv be of shape (n,1)
+        :param states:
+        :param rewards:
+        :param cstate_value:
+        :param log_softmax_actions:
+        :param gamma:
+        :param entropy_fn:
+        :return:
+        """
         n_t = len(states)
         # cstate_value = cstate_value.detach()
         total_rewards = np.sum(rewards)  # no disc
@@ -20,15 +30,14 @@ class A2C():
         td_target = rewards + gamma * nstate_value  # t
         # A = R - v = R - value[0:t]
         adv = td_target - cstate_value[:-1]  # bellman error
-        adv = adv.squeeze(-1) # i am not sure but i guess critic should not be involved in differentiation
+        # adv = adv.squeeze(-1) # i am not sure but i guess critic should not be involved in differentiation
         criterion = nn.MSELoss()
         bellman_error = criterion(td_target, cstate_value[:-1])
 
-        actions_var = Variable(actions).cuda()
-        # if this drops to 0, might well lead to some problem, e.g., the return drop drastically, but is multiplied by 0
-        actions_logp = -torch.sum(log_softmax_actions * actions_var, dim=1)[:n_t] + 1e-4  # n,1
-
-        sudo_loss = torch.sum(actions_logp * adv.detach(), dim=0)
+        # this is required only by discrete action space
+        # actions_logp = -torch.sum(log_softmax_actions * actions_var, dim=1)[:n_t] + 1e-4  # n,1
+        actions_logp = -log_softmax_actions
+        sudo_loss = torch.sum(actions_logp * adv.detach(), dim=(0,1)) # n,1
 
         if entropy_fn is not None:
             sudo_loss += self.ent_weight*entropy_fn(log_softmax_actions)

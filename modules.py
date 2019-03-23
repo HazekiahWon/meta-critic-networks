@@ -1,5 +1,6 @@
 from utils import *
-from rlkit.torch.distributions import TanhNormal
+from rlkit.torch.distributions import TanhNormal, Normal
+import rlkit.torch.pytorch_util as ptu
 nonlinearity = F.leaky_relu
 
 class FCPrototype(nn.Module):
@@ -54,11 +55,16 @@ class GaussianFCPrototype(nn.Module):
         logstd = torch.clamp(logstd, LOGMIN, LOGMAX)
         std = torch.exp(logstd)
 
-        tanh_normal = TanhNormal(mean.cpu(), std.cpu())
-        action, pre_tanh_value = tanh_normal.rsample(return_pretanh_value=True)
-        logp = tanh_normal.log_prob(action, pre_tanh_value) #
-        logp = logp.sum(dim=1, keepdim=True) # why
-        return action, pre_tanh_value, logp
+        unit_normal = Normal(
+                ptu.zeros(mean.size()),
+                ptu.ones(std.size())
+        )
+        eps = unit_normal.sample()
+        pre_tanh_z = mean.cpu()+std.cpu()*eps
+        action = torch.tanh(pre_tanh_z)
+        logp = unit_normal.log_prob(eps) #
+        logp = logp.sum(dim=1, keepdim=True) # logsum = exp mult
+        return action, pre_tanh_z, logp
 
 
 class Actor_with_latent(FCPrototype): # s,z

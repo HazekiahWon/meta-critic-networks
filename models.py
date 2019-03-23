@@ -355,9 +355,9 @@ class Singletask(BaseModel):
                 # one_hot_action = [int(k == action) for k in range(self.action_dim)]
                 next_state, reward, done, _ = task.step(action)
 
-            fix_reward = -10 if done else 1  # this will cause total reward to be smaller than 0
+            # fix_reward = -10 if done else 1  # this will cause total reward to be smaller than 0
             actions.append(action)
-            rewards.append(fix_reward)
+            rewards.append(reward)
             final_state = next_state
             state = next_state
 
@@ -389,8 +389,7 @@ class Singletask(BaseModel):
             states, actions, rewards, is_done, log_softmax_actions = self.roll_out(None, self.actor_network, self.task,
                                                                               horizon, reset=True)
             cstate_value = self.value_baseline(states)
-            sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, actions,
-                                                                                                rewards,
+            sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, rewards,
                                                                                                 cstate_value,
                                                                                                 log_softmax_actions,
                                                                                                 gamma)
@@ -406,16 +405,15 @@ class Singletask(BaseModel):
             loss_buffer.append(avg_ret.item())
             m = np.mean(list(loss_buffer))
             self.writer.add_scalar('actor/avg_return', avg_ret, step)
-            # print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
-
-            if (step + 1) % actor_report_freq == 0:
-                print(f'step {step} with avg return {m}.')
-                if m > double_horizon_threshold * horizon:
-                    double_check += 1
-                    if double_check == 3:
-                        horizon += HORIZON
-                        print(f'step {step} horizon={horizon}')
-                        double_check = 0
+            print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
+            # if (step + 1) % actor_report_freq == 0:
+            #     print(f'step {step} with avg return {m}.')
+            #     if m > double_horizon_threshold * horizon:
+            #         double_check += 1
+            #         if double_check == 3:
+            #             horizon += HORIZON
+            #             print(f'step {step} horizon={horizon}')
+            #             double_check = 0
 
             if (step + 1) % policy_task_resample_freq == 0:
                 self.val_and_save(horizon, val_cnt, step)
