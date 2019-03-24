@@ -1,8 +1,15 @@
 from utils import *
 from rlkit.torch.distributions import TanhNormal, Normal
+from rlkit.torch.core import PyTorchModule
+from rlkit.torch.modules import LayerNorm
+from rlkit.policies.base import ExplorationPolicy, Policy
+from rlkit.torch.distributions import TanhNormal
+from rlkit.torch.networks import Mlp
+from rlkit.torch.core import np_ify
 import rlkit.torch.pytorch_util as ptu
 nonlinearity = F.leaky_relu
-class BaseFCPrototype(nn.Module):
+
+class BaseFCPrototype(PyTorchModule):
 
     def __init__(self, input_dims, fcs, nonlin=None):
         super(BaseFCPrototype, self).__init__()
@@ -68,7 +75,120 @@ class GaussianFCPrototype(BaseFCPrototype):
         action = torch.tanh(pre_tanh_z)
         logp = unit_normal.log_prob(eps) #
         logp = logp.sum(dim=1, keepdim=True) # logsum = exp mult
-        return action, pre_tanh_z, logp
+        return action, pre_tanh_z, logp, mean, logstd
+
+
+class TanhGaussianPolicy(Mlp, ExplorationPolicy):
+    """
+    Usage:
+
+    ```
+    policy = TanhGaussianPolicy(...)
+    action, mean, log_std, _ = policy(obs)
+    action, mean, log_std, _ = policy(obs, deterministic=True)
+    action, mean, log_std, log_prob = policy(obs, return_log_prob=True)
+    ```
+    Here, mean and log_std are the mean and log_std of the Gaussian that is
+    sampled from.
+
+    If deterministic is True, action = tanh(mean).
+    If return_log_prob is False (default), log_prob = None
+        This is done because computing the log_prob can be a bit expensive.
+    """
+
+    def __init__(
+            self,
+            hidden_sizes,
+            obs_dim,
+            action_dim,
+            latent_dim=None,
+            std=None,
+            init_w=1e-3,
+            **kwargs
+    ):
+        self.save_init_params(locals())
+        super().__init__(
+            hidden_sizes,
+            input_size=obs_dim,
+            output_size=action_dim,
+            init_w=init_w,
+            **kwargs
+        )
+        self.latent_dim = latent_dim
+        self.log_std = None
+        self.std = std
+        if std is None:
+            last_hidden_size = obs_dim
+            if len(hidden_sizes) > 0:
+                last_hidden_size = hidden_sizes[-1]
+            self.last_fc_log_std = nn.Linear(last_hidden_size, action_dim)
+            self.last_fc_log_std.weight.data.uniform_(-init_w, init_w)
+            self.last_fc_log_std.bias.data.uniform_(-init_w, init_w)
+        else:
+            self.log_std = np.log(std)
+            # assert LOG_SIG_MIN <= self.log_std <= LOG_SIG_MAX
+
+    def get_action(self, obs, deterministic=False):
+        actions = self.get_actions(obs, deterministic=deterministic)
+        return actions[0, :], {}
+
+    @torch.no_grad()
+    def get_actions(self, obs, deterministic=False):
+        outputs = self.forward(obs, deterministic=deterministic)[0]
+        return np_ify(outputs)
+
+    def forward(
+            self,
+            obs,
+            reparameterize=True,
+            deterministic=False,
+    ):
+        """
+        :param obs: Observation
+        :param deterministic: If True, do not sample
+        :param return_log_prob: If True, return a sample and its log probability
+        """
+        h = obs
+        for i, fc in enumerate(self.fcs):
+            h = self.hidden_activation(fc(h))
+        mean = self.last_fc(h)
+        if self.std is None:
+            log_std = self.last_fc_log_std(h)
+            log_std = torch.clamp(log_std, LOGMIN, LOGMAX)
+            std = torch.exp(log_std)
+        else:
+            std = self.std
+            log_std = self.log_std
+
+        log_prob = None
+        expected_log_prob = None
+        mean_action_log_prob = None
+        pre_tanh_value = None
+        tanh_normal = TanhNormal(mean.cpu(), std.cpu())
+        if reparameterize:
+            action, pre_tanh_value = tanh_normal.rsample(
+                return_pretanh_value=True
+            )
+        else:
+            action, pre_tanh_value = tanh_normal.sample(
+                return_pretanh_value=True
+            )
+        log_prob = tanh_normal.log_prob(
+            action,
+            pre_tanh_value=pre_tanh_value
+        )
+        log_prob = log_prob.sum(dim=1, keepdim=True)
+
+        return action.cuda(), pre_tanh_value.cuda(), log_prob.cuda(), mean, log_std
+
+class FlattenMlp(Mlp):
+    """
+    if there are multiple inputs, concatenate along dim 1
+    """
+
+    def forward(self, *inputs, **kwargs):
+        flat_inputs = torch.cat(inputs, dim=1)
+        return super().forward(flat_inputs, **kwargs)
 
 class Actor_with_latent(FCPrototype): # s,z
     def __init__(self, STATE_DIM, ACTION_DIM, nonlin=None):
@@ -85,6 +205,10 @@ class VBase_with_latent(FCPrototype): # s,z
 class VBase(FCPrototype): # s,z
     def __init__(self, STATE_DIM, nonlin=None):
         super(VBase, self).__init__((STATE_DIM,), value_fcs, 1, None, nonlin)
+
+class QBase(FCPrototype): # s,z
+    def __init__(self, STATE_DIM, ACTION_DIM, nonlin=None):
+        super(QBase, self).__init__((STATE_DIM, ACTION_DIM), value_fcs, 1, None, nonlin)
 
 class Actor(FCPrototype):
     def __init__(self, STATE_DIM, ACTION_DIM, nonlin=None):

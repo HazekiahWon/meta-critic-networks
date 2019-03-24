@@ -334,7 +334,7 @@ class Singletask(BaseModel):
         for j in range(sample_nums):
             states.append(state)
 
-            action, _, logp = self.algo.actor_network(torch.Tensor([state]).cuda()) # return cpu version
+            action, logp = self.algo.get_action(torch.Tensor([state]).cuda()) # return cpu version
             action = action.cpu().data.numpy()[0]
             next_state, reward, done = single_step_rollout(action, task)
             # one_hot_action = [int(k == action) for k in range(self.action_dim)]
@@ -384,23 +384,27 @@ class Singletask(BaseModel):
             if is_done[-1,0]: s = None
             else: s = fin
 
-            sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, rewards,
-                                                                                                is_done,
-                                                                                                log_softmax_actions,
-                                                                                                gamma)
+            # sudo_loss, bellman_error, actions_logp, advantages = self.algo.train(states, rewards,
+            #                                                                                     is_done,
+            #                                                                                     log_softmax_actions,
+            #                                                                                     gamma)
+            # states, actions, rewards, dones, gamma
+            qf_loss, vf_loss, actor_loss, actions_logp, advantages = self.algo.train(states, actions, rewards, is_done, gamma)
+            losses = (qf_loss, vf_loss, actor_loss)
 
             self.writer.add_histogram('actor/actions_logp', actions_logp, step)
             self.writer.add_histogram('actor/advantages', advantages, step)
 
-            self.algo.optimize(sudo_loss, bellman_error, self.writer, step)
+            self.algo.optimize(losses, self.writer, step)
 
+            total_rewards = np.sum(rewards)
             avg_ret = total_rewards/reward_scale
             if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
             loss_buffer.append(avg_ret.item())
             m = np.mean(list(loss_buffer))
             self.writer.add_scalar('actor/avg_return', avg_ret, step)
-            if print_every_step:
-                print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
+            # if print_every_step:
+            #     print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
             if (step + 1) % actor_report_freq == 0:
                 print(f'step {step} with avg return {m}.')
                 if m > double_horizon_threshold * horizon:
@@ -434,11 +438,14 @@ class Singletask(BaseModel):
 
 
 def main():
-    env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
+    env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=1.)
     # model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
-    model = Singletask(env, algo=dict(cls=A2C,
-                                      params=dict(be_w=1., model_lr=(1e-3, 1e-3), modules=('value_baseline','actor_network')))) # value actor
+    # model = Singletask(env, algo=dict(cls=A2C,
+    #                                   params=dict(be_w=1., model_lr=(1e-3, 1e-3), modules=('value_baseline','actor_network')))) # value actor
+    model = Singletask(env, algo=dict(cls=SAC,
+                                      params=dict(modules=('value_baseline', 'target_v', 'actor_network', 'q1', 'q2'),
+                                                  model_lr=[1e-3]*5)))
     model.deploy()
 
 if __name__ == '__main__':
