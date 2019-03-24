@@ -16,29 +16,19 @@ from rlkit.envs.wrappers import NormalizedBoxEnv
 from rlkit.torch import pytorch_util as ptu
 
 class BaseModel():
-    def __init__(self, env, modules, model_lr):
+    def __init__(self, env, algo):
         self.env = env
         self.task_ids = env.get_all_task_idx()
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.shape[0]
-        self.modules = modules
-        self.model_lr = {name:lr for name,lr in zip(self.modules,model_lr)}
+        self.algo = algo['cls'](self.state_dim, self.action_dim, **algo['params'])
 
     def reset_cur_task(self, idx):
         # idx = np.random.randint(len(self.task_ids))
         self.env.reset_task(idx)
 
     def defualt_setup(self, memo=None):
-        # for the convenience of saving
-        model_dict = {name: self.__getattribute__(name) for name in self.modules}
-        if resume_model_dir is not None:
-            for n, m in model_dict.items():
-                self.load_model(m, os.path.join(resume_model_dir, n, '.pkl'))  # remember to add {step}
 
-        model_opt = {name: torch.optim.Adam(net.parameters(), lr=self.model_lr[name]) for name, net in
-                     model_dict.items()}
-
-        self.model_dict, self.model_opt = model_dict, model_opt
 
         expname = os.path.join(logdir, time.strftime('exp_%y%m%d_%H%M%S', time.localtime()))
         os.makedirs(expname, exist_ok=True)
@@ -309,17 +299,12 @@ class Multitask(BaseModel):
         self.train_policy()
 
 class Singletask(BaseModel):
-    def __init__(self, env, algo, model_lr=(5e-3,5e-3)):
-        modules = ['value_baseline', 'actor_network']
-        super(Singletask, self).__init__(env, modules, model_lr)
-        self.algo = algo
+    def __init__(self, env, algo):
+        super(Singletask, self).__init__(env, algo)
+
 
     def setup_modules(self):
-        self.value_baseline = VBase(self.state_dim, nonlin=F.elu)
-        self.actor_network = GaussianActor(self.state_dim, self.action_dim, nonlin=F.tanh)
-        # send to cuda
-        self.value_baseline.cuda()
-        self.actor_network.cuda()
+        self.algo.setup()
 
         # random_choice = np.random.uniform(L_MIN, L_MAX)
         random_choice = np.random.randint(len(self.task_ids))
@@ -329,7 +314,7 @@ class Singletask(BaseModel):
         self.reset_cur_task(random_choice)
         self.task = self.env
 
-    def roll_out(self, state, actor_network, task, sample_nums, reset=False, to_cuda=True):
+    def roll_out(self, state, task, sample_nums, to_cuda=True):
         """
         sample a sequence of time steps
         :param actor_network:
@@ -349,16 +334,11 @@ class Singletask(BaseModel):
         for j in range(sample_nums):
             states.append(state)
 
-            if actor_network is not None:
-                action, _, logp = actor_network(torch.Tensor([state]).cuda()) # return cpu version
-                action = action.cpu().data.numpy()[0]
-                next_state, reward, done = single_step_rollout(action, task)
-                # one_hot_action = [int(k == action) for k in range(self.action_dim)]
-                actions_logp.append(logp)
-            else:
-                action = task.action_space.sample()
-                # one_hot_action = [int(k == action) for k in range(self.action_dim)]
-                next_state, reward, done, _ = task.step(action)
+            action, _, logp = self.algo.actor_network(torch.Tensor([state]).cuda()) # return cpu version
+            action = action.cpu().data.numpy()[0]
+            next_state, reward, done = single_step_rollout(action, task)
+            # one_hot_action = [int(k == action) for k in range(self.action_dim)]
+            actions_logp.append(logp)
 
             # fix_reward = -10 if done else 1  # this will cause total reward to be smaller than 0
             actions.append(action)
@@ -382,12 +362,10 @@ class Singletask(BaseModel):
 
         dones = torch.Tensor(dones).cuda()
 
-        if actor_network is None:
-            return s, a, r, is_done, final_state
-        else:
-            logp = torch.cat(actions_logp, dim=0)
-            if to_cuda: logp = logp.cuda()
-            return s, a, r, dones, logp, final_state
+
+        logp = torch.cat(actions_logp, dim=0)
+        if to_cuda: logp = logp.cuda()
+        return s, a, r, dones, logp, final_state
 
     def train_policy(self):
         print('Train policy.')
@@ -401,21 +379,20 @@ class Singletask(BaseModel):
         s = None
         for step in range(STEP):
             # obtain z and experience data to train the actor
-            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(s, self.actor_network, self.task,
-                                                                              horizon, reset=True)
+            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(s, self.task, horizon)
+
             if is_done[-1,0]: s = None
             else: s = fin
-            cstate_value = self.value_baseline(states)
+
             sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, rewards,
-                                                                                                cstate_value, is_done,
+                                                                                                is_done,
                                                                                                 log_softmax_actions,
                                                                                                 gamma)
 
             self.writer.add_histogram('actor/actions_logp', actions_logp, step)
             self.writer.add_histogram('actor/advantages', advantages, step)
 
-            self.algo.optimize(sudo_loss, bellman_error, self.model_dict, self.model_opt,
-                               ('actor_network', 'value_baseline'), self.writer, step)
+            self.algo.optimize(sudo_loss, bellman_error, self.writer, step)
 
             avg_ret = total_rewards/reward_scale
             if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
@@ -443,8 +420,7 @@ class Singletask(BaseModel):
         print('=' * 25 + ' validation ' + '=' * 25)
         results = list()
         for test_epi in range(10):  # test for 10 epochs and takes the average
-            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(None, self.actor_network, self.task,
-                                                                                   200, reset=True)
+            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(None, self.task, 200)
             results.append(np.sum(rewards))
 
         val_res = np.mean(results)/reward_scale
@@ -461,7 +437,8 @@ def main():
     env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
     # model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
-    model = Singletask(env, algo=A2C(1), model_lr=(1e-3, 1e-3)) # value actor
+    model = Singletask(env, algo=dict(cls=A2C,
+                                      params=dict(be_w=1., model_lr=(1e-3, 1e-3), modules=('value_baseline','actor_network')))) # value actor
     model.deploy()
 
 if __name__ == '__main__':

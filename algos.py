@@ -1,12 +1,35 @@
 from common_imports import *
 from utils import *
+from modules import *
 
 class A2C():
-    def __init__(self, be_w, ent_w=0.1):
+    def __init__(self, state_dim, action_dim, modules, model_lr, be_w, ent_w=0.1):
         self.bellman_weight = be_w
         self.ent_weight = ent_w
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.modules = modules
+        self.model_lr = {name: lr for name, lr in zip(self.modules, model_lr)}
 
-    def train(self, states, rewards, cstate_value, dones, log_softmax_actions, gamma, entropy_fn=None):
+    def setup(self):
+        self.value_baseline = VBase(self.state_dim, nonlin=F.elu)
+        self.actor_network = GaussianActor(self.state_dim, self.action_dim, nonlin=F.tanh)
+        # send to cuda
+        self.value_baseline.cuda()
+        self.actor_network.cuda()
+
+        # for the convenience of saving
+        model_dict = {name: self.__getattribute__(name) for name in self.modules}
+        # if resume_model_dir is not None:
+        #     for n, m in model_dict.items():
+        #         self.load_model(m, os.path.join(resume_model_dir, n, '.pkl'))  # remember to add {step}
+
+        model_opt = {name: torch.optim.Adam(net.parameters(), lr=self.model_lr[name]) for name, net in
+                     model_dict.items()}
+
+        self.model_dict, self.model_opt = model_dict, model_opt
+
+    def train(self, states, rewards, dones, log_softmax_actions, gamma, entropy_fn=None):
         """
         do make sure logp and adv be of shape (n,1)
         :param states:
@@ -20,6 +43,7 @@ class A2C():
         n_t = len(states)
         # cstate_value = cstate_value.detach()
         total_rewards = np.sum(rewards)  # no disc
+        cstate_value = self.value_baseline(states)
         # disc_return = torch.Tensor(seq_reward2go(rewards, gamma)).cuda()
         # value[0:t+1], including the final state
         # cstate_value = get_predicted_values(states, latent_z.repeat(states.size(0), 1), value_baseline)
@@ -44,13 +68,12 @@ class A2C():
 
         return sudo_loss, bellman_error, total_rewards, actions_logp, adv
 
-    def optimize(self, ac_loss, bl_loss, model_dict, model_opt, model_names, writer, step):
+    def optimize(self, ac_loss, bl_loss, writer, step):
         overall_loss = ac_loss + self.bellman_weight * bl_loss
         overall_loss.backward()
-        step_optimizers(model_dict, model_opt, model_names)
+        step_optimizers(self.model_dict, self.model_opt, self.modules)
         writer.add_scalar('actor/critic_loss', bl_loss, step)
         writer.add_scalar('actor/actor_loss', ac_loss, step)
-
 
 class SAC():
     def __init__(self, be_w, ent_w=0.1):
