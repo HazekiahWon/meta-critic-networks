@@ -9,7 +9,7 @@ TASK_NUMS = 10
 task_nlayer = 3
 
 Z_DIM = 16
-fusion_dim = 16
+fusion_dim = 64
 actor_hdim = 64
 dynEmb_hdim = 64
 trans_hdim = 64
@@ -25,20 +25,22 @@ n_sample = 2
 stochastic_encoder = True
 vae_thresh = 1.
 STEP = 50000
-HORIZON = 200 #5,10,20
+HORIZON = 20 #5,10,20
 TEST_SAMPLE_NUMS = 5
 use_baseline = True
 
 logdir = 'saved_models'
 double_horizon_threshold = 0.9
-memo = 'testing the algo in single env'
+memo = 'testing the a2c in single env, reward scale 0.1, actor[6464tanh], critic[6464elu]'
 
 resume_model_dir = None
 reward_scale = 1.
 LOGMIN = -20
 LOGMAX = 2
 
-actor_fcs = [400, 300]
+actor_fcs = [64, 64]
 value_fcs = [64, 64]
 trans_fcs = [64]
 dyn_fcs = [64,64]
+
+print_every_step = False

@@ -315,8 +315,8 @@ class Singletask(BaseModel):
         self.algo = algo
 
     def setup_modules(self):
-        self.value_baseline = VBase(self.state_dim)
-        self.actor_network = GaussianActor(self.state_dim, self.action_dim)
+        self.value_baseline = VBase(self.state_dim, nonlin=F.elu)
+        self.actor_network = GaussianActor(self.state_dim, self.action_dim, nonlin=F.tanh)
         # send to cuda
         self.value_baseline.cuda()
         self.actor_network.cuda()
@@ -337,7 +337,7 @@ class Singletask(BaseModel):
         :param sample_nums:
         :return:
         """
-        if reset:
+        if state is None:
             state = task.reset()
         states = []
         actions = []
@@ -374,12 +374,20 @@ class Singletask(BaseModel):
         states.append(final_state)
         s, a, r = torch.Tensor(states), torch.Tensor(actions), reward_scale*np.asarray(rewards)
         if to_cuda: s, a = s.cuda(), a.cuda()
+
+
+        dones = np.zeros((len(actions),1))
+        if is_done:
+            dones[-1,0] = 1
+
+        dones = torch.Tensor(dones).cuda()
+
         if actor_network is None:
-            return s, a, r, is_done
+            return s, a, r, is_done, final_state
         else:
             logp = torch.cat(actions_logp, dim=0)
             if to_cuda: logp = logp.cuda()
-            return s, a, r, is_done, logp
+            return s, a, r, dones, logp, final_state
 
     def train_policy(self):
         print('Train policy.')
@@ -389,13 +397,17 @@ class Singletask(BaseModel):
         horizon = HORIZON  # to continuously increase the hardship of the trajectories.
         gamma = pow(0.05, 1. / horizon)
         double_check = 0
+        done = True
+        s = None
         for step in range(STEP):
             # obtain z and experience data to train the actor
-            states, actions, rewards, is_done, log_softmax_actions = self.roll_out(None, self.actor_network, self.task,
+            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(s, self.actor_network, self.task,
                                                                               horizon, reset=True)
+            if is_done[-1,0]: s = None
+            else: s = fin
             cstate_value = self.value_baseline(states)
             sudo_loss, bellman_error, total_rewards, actions_logp, advantages = self.algo.train(states, rewards,
-                                                                                                cstate_value,
+                                                                                                cstate_value, is_done,
                                                                                                 log_softmax_actions,
                                                                                                 gamma)
 
@@ -410,15 +422,16 @@ class Singletask(BaseModel):
             loss_buffer.append(avg_ret.item())
             m = np.mean(list(loss_buffer))
             self.writer.add_scalar('actor/avg_return', avg_ret, step)
-            print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
-            # if (step + 1) % actor_report_freq == 0:
-            #     print(f'step {step} with avg return {m}.')
-            #     if m > double_horizon_threshold * horizon:
-            #         double_check += 1
-            #         if double_check == 3:
-            #             horizon += HORIZON
-            #             print(f'step {step} horizon={horizon}')
-            #             double_check = 0
+            if print_every_step:
+                print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
+            if (step + 1) % actor_report_freq == 0:
+                print(f'step {step} with avg return {m}.')
+                if m > double_horizon_threshold * horizon:
+                    double_check += 1
+                    if double_check == 3:
+                        horizon += HORIZON
+                        print(f'step {step} horizon={horizon}')
+                        double_check = 0
 
             if (step + 1) % policy_task_resample_freq == 0:
                 self.val_and_save(horizon, val_cnt, step)
@@ -430,7 +443,7 @@ class Singletask(BaseModel):
         print('=' * 25 + ' validation ' + '=' * 25)
         results = list()
         for test_epi in range(10):  # test for 10 epochs and takes the average
-            states, actions, rewards, is_done, log_softmax_actions = self.roll_out(None, self.actor_network, self.task,
+            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(None, self.actor_network, self.task,
                                                                                    200, reset=True)
             results.append(np.sum(rewards))
 
@@ -446,9 +459,9 @@ class Singletask(BaseModel):
 
 def main():
     env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
-    model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
+    # model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
-    # model = Singletask(env, algo=A2C(1), model_lr=(1e-3, 1e-3)) # value actor
+    model = Singletask(env, algo=A2C(1), model_lr=(1e-3, 1e-3)) # value actor
     model.deploy()
 
 if __name__ == '__main__':
