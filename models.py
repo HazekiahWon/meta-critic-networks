@@ -93,6 +93,50 @@ class Multitask(BaseModel):
 
         self.task = self.env
 
+
+    def collect_data(self, sample_nums):
+        # print(f'collecting {sample_nums} steps.')
+        state = None
+        current_cnt = 0
+        returns = list()
+        ret = 0
+        for i in range(sample_nums):
+            if state is None: state = self.task.reset()
+            action, logp = self.algo.get_action(ptu.from_numpy(np.expand_dims(state, 0)))  # return cpu version
+            action = ptu.get_numpy(action)[0]
+            next_state, reward, done = single_step_rollout(action, self.task)
+            reward *= reward_scale
+            ret += reward
+            self.replay_buffer.add_sample(task=self.task_ids[0], # single task
+                                          observation=state,
+                                          action=action,
+                                          reward=reward,
+                                          terminal=done,
+                                          next_observation=next_state
+                                          )
+            current_cnt += 1
+            if done or current_cnt==self.max_path_length:
+                self.replay_buffer.terminate_episode(self.task_ids[0])
+                state = None
+                current_cnt = 0
+                returns.append(ret)
+                ret = 0
+            else: state = next_state
+        return np.mean(returns)
+
+    def get_batch(self):
+        batch = self.replay_buffer.random_batch(self.task_ids[0], self.batch_size)
+
+        o = batch['observations']
+        a = batch['actions']
+        r = batch['rewards']
+        no = batch['next_observations']
+        t = batch['terminals']
+
+        o,a,no = [ptu.from_numpy(x) for x in [o,a,no]]
+
+        return o,a,r,no,t
+
     def roll_out(self, state, actor_network, task, sample_nums, z, reset=False, to_cuda=True):
         """
         sample a sequence of time steps
@@ -304,10 +348,185 @@ class Multitask(BaseModel):
         self.train_vae()
         self.train_policy()
 
+class Multtask(BaseModel):
+    def __init__(self, env, algo, meta_batch=4, val_batch=4, single=True):
+        super(Multtask, self).__init__(env, algo, single)
+        self.meta_batch = meta_batch
+        self.val_batch = val_batch
+
+    def setup_modules(self):
+        self.algo.setup()
+
+        print(f'tasks totaling {len(self.task_ids)}')
+        self.defualt_setup(memo=config.memo)
+        self.task = self.env
+
+    def collect_data(self, task_id, sample_nums):
+        # print(f'collecting {sample_nums} steps.')
+        state = None
+        current_cnt = 0
+        returns = list()
+        ret = 0
+        for i in range(sample_nums):
+            if state is None: state = self.task.reset()
+            action, logp = self.algo.get_action(ptu.from_numpy(np.expand_dims(state, 0)))  # return cpu version
+            action = ptu.get_numpy(action)[0]
+            next_state, reward, done = single_step_rollout(action, self.task)
+            reward *= reward_scale
+            ret += reward
+            self.replay_buffer.add_sample(task=task_id, # single task
+                                          observation=state,
+                                          action=action,
+                                          reward=reward,
+                                          terminal=done,
+                                          next_observation=next_state
+                                          )
+            current_cnt += 1
+            if done or current_cnt==self.max_path_length:
+                self.replay_buffer.terminate_episode(self.task_ids[0])
+                state = None
+                current_cnt = 0
+                returns.append(ret)
+                ret = 0
+            else: state = next_state
+        return np.mean(returns)
+
+    def get_batch(self, idx):
+        batch = self.replay_buffer.random_batch(idx, self.batch_size)
+
+        o = batch['observations']
+        a = batch['actions']
+        r = batch['rewards']
+        no = batch['next_observations']
+        t = batch['terminals']
+
+        o,a,no = [ptu.from_numpy(x) for x in [o,a,no]]
+
+        return o,a,r,no,t
+
+    def roll_out(self, state, task, sample_nums, to_cuda=True):
+        """
+        sample a sequence of time steps
+        :param actor_network:
+        :param task:
+        :param sample_nums:
+        :return:
+        """
+        if state is None:
+            state = task.reset()
+        states = []
+        actions = []
+        rewards = []
+        is_done = False
+        # state = task.state  # ?
+        actions_logp = list()
+        result = 0
+        for j in range(sample_nums):
+            states.append(state)
+
+            action, logp = self.algo.get_action(ptu.from_numpy(np.expand_dims(state, 0))) # return cpu version
+            action = ptu.get_numpy(action)[0]
+            next_state, reward, done = single_step_rollout(action, task)
+            # one_hot_action = [int(k == action) for k in range(self.action_dim)]
+            actions_logp.append(logp)
+            # fix_reward = -10 if done else 1  # this will cause total reward to be smaller than 0
+            actions.append(action)
+            rewards.append(reward)
+            final_state = next_state
+            state = next_state
+
+            if done:
+                is_done = True
+                task.reset()
+                # print("result:",result)
+                break
+        states.append(final_state)
+        s, a, r = torch.Tensor(states), torch.Tensor(actions), reward_scale*np.asarray(rewards)
+        if to_cuda: s, a = s.cuda(), a.cuda()
+
+        dones = np.zeros((len(actions),1))
+        if is_done:
+            dones[-1,0] = 1
+
+        dones = torch.Tensor(dones).cuda()
+
+        logp = torch.cat(actions_logp, dim=0)
+        if to_cuda: logp = logp.cuda()
+        return s, a, r, dones, logp, final_state
+
+    def train_policy(self):
+        print('Train policy.')
+        loss_buffer = deque(maxlen=actor_report_freq)
+
+        val_cnt = 0
+        horizon = HORIZON  # to continuously increase the hardship of the trajectories.
+        gamma = 0.99#pow(0.05, 1. / horizon)
+        double_check = 0
+        done = True
+        s = None
+        # collect some data
+        for idx in self.task_ids:
+            self.reset_cur_task(idx)
+            self.collect_data(idx, self.max_buffer_size//2)
+        for step in range(STEP):
+            # collect some data
+            meta_train_idx = np.random.choice(self.task_ids, min(len(self.task_ids), self.meta_batch))
+            s,a,r,ns,dones = [],[],[],[],[]
+            r_tasks = list()
+            for idx in meta_train_idx:
+                self.reset_cur_task(idx)
+                rewards = self.collect_data(idx, self.max_path_length)
+                r_tasks.append(rewards)
+                ret = self.get_batch(idx)
+                for x,y in zip([s,a,r,ns,dones],ret):
+                    x.append(y)
+            states,actions,rewards,nstates,dones = torch.stack(s),torch.stack(actions),np.stack(rewards),torch.cat(ns),np.stack(done)
+            # train for several steps
+            qf_loss, vf_loss, actor_loss, actions_logp, advantages, aux = self.algo.train(states, actions, rewards, nstates, dones, gamma)
+            losses = (qf_loss, vf_loss, actor_loss)
+            q1,q2,q_target = aux
+            self.writer.add_histogram('q1',q1, step)
+            self.writer.add_histogram('q2', q2, step)
+            self.writer.add_histogram('qt', q_target, step)
+
+            self.writer.add_histogram('actor/actions_logp', actions_logp, step)
+            self.writer.add_histogram('actor/advantages', advantages, step)
+
+            self.algo.optimize(losses, self.writer, step)
+
+            # total_rewards = np.sum(rewards)
+            avg_ret = np.mean(r_tasks)/reward_scale # avg across tasks
+            # if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
+            # loss_buffer.append(avg_ret.item())
+            # m = np.mean(list(loss_buffer))
+            self.writer.add_scalar('actor/avg_return', avg_ret, step)
+
+            if (step + 1) % policy_task_resample_freq == 0:
+                self.val_and_save(horizon, val_cnt, step)
+                val_cnt += 1
+
+    def val_and_save(self, horizon, val_cnt, step):
+        print('=' * 25 + ' validation ' + '=' * 25)
+        results = list()
+        val_idx = np.random.choice(self.task_ids, min(len(self.task_ids), self.val_batch))
+        for idx in val_idx:
+            self.reset_cur_task(idx)
+            for test_epi in range(10):  # test for 10 epochs and takes the average
+                states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(None, self.task, 200)
+                results.append(np.sum(rewards))
+
+        val_res = np.mean(results)/reward_scale
+        self.writer.add_scalar('actor/val_return', val_res, val_cnt)
+        print(f'average return {val_res} for 10 tests.')
+        print('=' * 25 + ' validation ' + '=' * 25)
+
+    def deploy(self):
+        self.setup_modules()
+        self.train_policy()
+
 class Singletask(BaseModel):
     def __init__(self, env, algo, single=True):
         super(Singletask, self).__init__(env, algo, single)
-
 
     def setup_modules(self):
         self.algo.setup()
@@ -322,7 +541,7 @@ class Singletask(BaseModel):
         self.task = self.env
 
     def collect_data(self, sample_nums):
-        print(f'collecting {sample_nums} steps.')
+        # print(f'collecting {sample_nums} steps.')
         state = None
         current_cnt = 0
         returns = list()
@@ -332,6 +551,7 @@ class Singletask(BaseModel):
             action, logp = self.algo.get_action(ptu.from_numpy(np.expand_dims(state, 0)))  # return cpu version
             action = ptu.get_numpy(action)[0]
             next_state, reward, done = single_step_rollout(action, self.task)
+            reward *= reward_scale
             ret += reward
             self.replay_buffer.add_sample(task=self.task_ids[0], # single task
                                           observation=state,
@@ -404,7 +624,6 @@ class Singletask(BaseModel):
         s, a, r = torch.Tensor(states), torch.Tensor(actions), reward_scale*np.asarray(rewards)
         if to_cuda: s, a = s.cuda(), a.cuda()
 
-
         dones = np.zeros((len(actions),1))
         if is_done:
             dones[-1,0] = 1
@@ -441,11 +660,15 @@ class Singletask(BaseModel):
 
 
             # collect some data
-            self.collect_data(self.max_path_length)
+            total_rewards = self.collect_data(self.max_path_length)
             states, actions, rewards,nstates,dones = self.get_batch()
             # train for several steps
-            qf_loss, vf_loss, actor_loss, actions_logp, advantages = self.algo.train(states, actions, rewards, nstates, dones, gamma)
+            qf_loss, vf_loss, actor_loss, actions_logp, advantages, aux = self.algo.train(states, actions, rewards, nstates, dones, gamma)
             losses = (qf_loss, vf_loss, actor_loss)
+            q1,q_target = aux
+            self.writer.add_histogram('q1',q1, step)
+            # self.writer.add_histogram('q2', q2, step)
+            self.writer.add_histogram('qt', q_target, step)
 
             self.writer.add_histogram('actor/actions_logp', actions_logp, step)
             self.writer.add_histogram('actor/advantages', advantages, step)
@@ -453,11 +676,11 @@ class Singletask(BaseModel):
             self.algo.optimize(losses, self.writer, step)
 
             # total_rewards = np.sum(rewards)
-            # avg_ret = total_rewards/reward_scale
-            # if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
-            # loss_buffer.append(avg_ret.item())
-            # m = np.mean(list(loss_buffer))
-            # self.writer.add_scalar('actor/avg_return', avg_ret, step)
+            avg_ret = total_rewards/reward_scale
+            if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
+            loss_buffer.append(avg_ret.item())
+            m = np.mean(list(loss_buffer))
+            self.writer.add_scalar('actor/avg_return', avg_ret, step)
 
             # if print_every_step:
             #     print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
@@ -495,7 +718,7 @@ class Singletask(BaseModel):
 
 def main():
     env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
-    env2 = gym.make('Ant-v2')
+    env2 = gym.make('Pendulum-v0')
     # model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
     # model = Singletask(env, algo=dict(cls=A2C,

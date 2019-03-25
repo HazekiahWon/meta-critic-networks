@@ -12,7 +12,7 @@ class MultiTaskReplayBuffer(object):
             tasks,
     ):
         """
-        :param max_replay_buffer_size:
+        :param max_replay_buffer_size: buffer size for each single task
         :param env:
         :param tasks: for multi-task setting
         """

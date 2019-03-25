@@ -111,7 +111,7 @@ class A2C(BaseAlgo):
 
 
 class SAC(BaseAlgo):
-    def __init__(self, state_dim, action_dim, modules, model_lr, a_mean_w=1e-3, a_std_w=1e-3, pre_a_w=0., soft_update_w=0.001):
+    def __init__(self, state_dim, action_dim, modules, model_lr, a_mean_w=1e-3, a_std_w=1e-3, pre_a_w=0., soft_update_w=0.005):
         super(SAC, self).__init__(state_dim, action_dim, modules, model_lr)
         # self.bellman_weight = be_w
         # self.ent_weight = ent_w
@@ -176,7 +176,7 @@ class SAC(BaseAlgo):
         # ? where to get actions
 
         q1 = self.q1(states, actions)
-        q2 = self.q2(states, actions)
+        # q2 = self.q2(states, actions)
         v = self.value_baseline(states) # z detach
 
         new_actions, pre_tanh_a, logp, mean_action, logstd_action = self.get_action(states, full=True)
@@ -186,10 +186,12 @@ class SAC(BaseAlgo):
 
         q_target = rewards + (1.-dones)*gamma*target_v
         q_target = ptu.from_numpy(q_target)
-        qf_loss = torch.mean((q1-q_target)**2)+torch.mean((q2-q_target)**2) # q1,q2,contextenc
+        qf_loss = 10.*(torch.mean((q1-q_target)**2))#+torch.mean((q2-q_target)**2)) # q1,q2,contextenc
 
         # min_q
-        min_q,logp_target = self.min_q(states, new_actions)
+        # min_q,logp_target = self.min_q(states, new_actions)
+        logp_target = self.q1(states, new_actions)
+        min_q = logp_target
         v_target = min_q - logp
         criterion = nn.MSELoss()
         vf_loss = criterion(v, v_target.detach()) # value_baseline, target_v (soft update, see line189 sac.py)
@@ -201,7 +203,9 @@ class SAC(BaseAlgo):
         actor_loss = policy_loss + self.a_mean_w*(mean_action**2).mean() + self.a_std_w*(logstd_action**2).mean()\
                      + self.pre_a_w*(pre_tanh_a**2).sum(dim=1).mean()
 
-        return qf_loss, vf_loss, actor_loss, logp, adv
+        aux = (q1, q_target)
+
+        return qf_loss, vf_loss, actor_loss, logp, adv, aux
 
     def optimize(self, losses, writer, step):
 
