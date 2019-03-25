@@ -164,7 +164,7 @@ class SAC(BaseAlgo):
         min_q = torch.min(q1, q2)
         return min_q, q1
 
-    def train(self, states, actions, rewards, nstates, dones, gamma, writer, step, entropy_fn=None):
+    def train(self, states, actions, rewards, nstates, dones, gamma, writer, step, reparameterize=reparameterize, double_q=double_q, entropy_fn=None):
         """
         do make sure logp and adv be of shape (n,1)
         :param states: n+1,20
@@ -189,14 +189,23 @@ class SAC(BaseAlgo):
         target_value = target_value_net(nstates)
         next_q_value = rewards + (1 - dones) * gamma * ptu.get_numpy(target_value)
         q_value_loss = soft_q_criterion(expected_q_value, ptu.from_numpy(next_q_value))
+        if double_q:
+            q2 = self.q2(states, actions)
+            q_value_loss += soft_q_criterion(q2, ptu.from_numpy(next_q_value))
         # v
         expected_new_q_value = soft_q_net(states, new_action)
+        if double_q:
+            nq2 = self.q2(states, new_action)
+            expected_new_q_value = torch.min(nq2, expected_new_q_value)
         next_value = expected_new_q_value - log_prob
         value_loss = value_criterion(expected_value, next_value.detach())
         # p
         log_prob_target = expected_new_q_value - expected_value
         adv = log_prob - log_prob_target# oyster uses this
-        policy_loss = (log_prob * adv.detach()).mean()
+        if reparameterize:
+            policy_loss = (log_prob - expected_new_q_value+expected_value.detach()).mean()
+        else:
+            policy_loss = (log_prob * adv.detach()).mean()
 
         mean_loss = mean_lambda * mean.pow(2).mean()
         std_loss = std_lambda * log_std.pow(2).mean()
@@ -205,8 +214,11 @@ class SAC(BaseAlgo):
         policy_loss += mean_loss + std_loss + z_loss
 
         soft_q_optimizer.zero_grad()
+        if double_q:
+            self.model_opt['q2'].zero_grad()
         q_value_loss.backward()
         soft_q_optimizer.step()
+        if double_q: self.model_opt['q2'].step()
 
         value_optimizer.zero_grad()
         value_loss.backward()
@@ -223,7 +235,9 @@ class SAC(BaseAlgo):
         writer.add_scalar('ploss', policy_loss, step)
         writer.add_histogram('logp', log_prob, step)
         writer.add_histogram('adv', log_prob - log_prob_target, step)
-        writer.add_histogram('q', expected_q_value, step)
+        writer.add_histogram('q1', expected_q_value, step)
+        if double_q:
+            writer.add_histogram('q2', q2, step)
         writer.add_histogram('qt', next_q_value, step)
 
 

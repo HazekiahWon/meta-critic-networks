@@ -140,7 +140,7 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
     def forward(
             self,
             obs,
-            reparameterize=False,
+            reparameterize=reparameterize,
             deterministic=False,
     ):
         """

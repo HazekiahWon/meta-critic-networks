@@ -44,3 +44,5 @@ trans_fcs = [64]
 dyn_fcs = [64,64]
 
 print_every_step = False
+reparameterize = True
+double_q = True
