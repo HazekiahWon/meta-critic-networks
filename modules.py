@@ -164,7 +164,7 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
         expected_log_prob = None
         mean_action_log_prob = None
         pre_tanh_value = None
-        tanh_normal = TanhNormal(mean.cpu(), std.cpu())
+        tanh_normal = TanhNormal(mean, std)
         if reparameterize:
             action, pre_tanh_value = tanh_normal.rsample(
                 return_pretanh_value=True

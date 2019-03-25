@@ -1,6 +1,8 @@
 from common_imports import *
 from utils import *
+from rlkit.data_management.env_replay_buffer import MultiTaskReplayBuffer
 from modules import *
+
 class BaseAlgo():
     def __init__(self, state_dim, action_dim, modules, model_lr):
         self.state_dim = state_dim
@@ -109,7 +111,7 @@ class A2C(BaseAlgo):
 
 
 class SAC(BaseAlgo):
-    def __init__(self, state_dim, action_dim, modules, model_lr, a_mean_w=1e-3, a_std_w=1e-3, pre_a_w=0., soft_update_w=0.005):
+    def __init__(self, state_dim, action_dim, modules, model_lr, a_mean_w=1e-3, a_std_w=1e-3, pre_a_w=0., soft_update_w=0.001):
         super(SAC, self).__init__(state_dim, action_dim, modules, model_lr)
         # self.bellman_weight = be_w
         # self.ent_weight = ent_w
@@ -117,6 +119,7 @@ class SAC(BaseAlgo):
         self.a_std_w = a_std_w
         self.pre_a_w = pre_a_w
         self.soft_update_weight = soft_update_w
+
 
     def setup(self):
 
@@ -156,9 +159,9 @@ class SAC(BaseAlgo):
         q1 = self.q1(states, actions) # z detach
         q2 = self.q2(states, actions) # z detach
         min_q = torch.min(q1, q2)
-        return min_q
+        return min_q, q1
 
-    def train(self, states, actions, rewards, dones, gamma, entropy_fn=None):
+    def train(self, states, actions, rewards, nstates, dones, gamma, entropy_fn=None):
         """
         do make sure logp and adv be of shape (n,1)
         :param states: n+1,20
@@ -172,28 +175,29 @@ class SAC(BaseAlgo):
         """
         # ? where to get actions
 
-        q1 = self.q1(states[:-1], actions)
-        q2 = self.q2(states[:-1], actions)
-        v = self.value_baseline(states[:-1]) # z detach
+        q1 = self.q1(states, actions)
+        q2 = self.q2(states, actions)
+        v = self.value_baseline(states) # z detach
 
-        new_actions, pre_tanh_a, logp, mean_action, logstd_action = self.get_action(states[:-1], full=True)
+        new_actions, pre_tanh_a, logp, mean_action, logstd_action = self.get_action(states, full=True)
 
-        with torch.no_grad():
-            target_v = self.target_v(states[1:])
+        target_v = self.target_v(nstates)
+        target_v = ptu.get_numpy(target_v)
 
-        q_target = torch.Tensor(rewards).cuda() + (1.-dones)*gamma*target_v.detach()
+        q_target = rewards + (1.-dones)*gamma*target_v
+        q_target = ptu.from_numpy(q_target)
         qf_loss = torch.mean((q1-q_target)**2)+torch.mean((q2-q_target)**2) # q1,q2,contextenc
 
         # min_q
-        min_q = self.min_q(states[:-1], new_actions)
+        min_q,logp_target = self.min_q(states, new_actions)
         v_target = min_q - logp
         criterion = nn.MSELoss()
         vf_loss = criterion(v, v_target.detach()) # value_baseline, target_v (soft update, see line189 sac.py)
 
-        logp_target = min_q
+        # logp_target = min_q
         adv = logp - logp_target + v
         # reparameterize
-        policy_loss = (logp - logp_target.detach()).mean()
+        policy_loss = (logp - logp_target).mean()
         actor_loss = policy_loss + self.a_mean_w*(mean_action**2).mean() + self.a_std_w*(logstd_action**2).mean()\
                      + self.pre_a_w*(pre_tanh_a**2).sum(dim=1).mean()
 

@@ -14,27 +14,33 @@ import config
 from rlkit.envs.half_cheetah_dir import HalfCheetahDirEnv
 from rlkit.envs.wrappers import NormalizedBoxEnv
 from rlkit.torch import pytorch_util as ptu
+import gym
 
 class BaseModel():
-    def __init__(self, env, algo):
+    def __init__(self, env, algo, single=False):
         self.env = env
-        self.task_ids = env.get_all_task_idx()
+        self.task_ids = (0,) if single else env.get_all_task_idx()
+        self.single = single
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.shape[0]
         self.algo = algo['cls'](self.state_dim, self.action_dim, **algo['params'])
+        max_size = 5000
+        self.max_buffer_size = max_size
+        self.replay_buffer = MultiTaskReplayBuffer(max_replay_buffer_size=max_size, env=env, tasks=self.task_ids)
+        self.max_path_length = 200
+        self.batch_size = 256
 
     def reset_cur_task(self, idx):
         # idx = np.random.randint(len(self.task_ids))
         self.env.reset_task(idx)
 
     def defualt_setup(self, memo=None):
-
-
         expname = os.path.join(logdir, time.strftime('exp_%y%m%d_%H%M%S', time.localtime()))
         os.makedirs(expname, exist_ok=True)
         self.save_meta(expname, config.memo if memo is None else memo)
         self.writer = SummaryWriter(log_dir=expname)
         self.expname = expname
+        ptu.set_gpu_mode(True)
 
     @staticmethod
     def load_model(net, model_file_path):
@@ -299,8 +305,8 @@ class Multitask(BaseModel):
         self.train_policy()
 
 class Singletask(BaseModel):
-    def __init__(self, env, algo):
-        super(Singletask, self).__init__(env, algo)
+    def __init__(self, env, algo, single=True):
+        super(Singletask, self).__init__(env, algo, single)
 
 
     def setup_modules(self):
@@ -311,8 +317,51 @@ class Singletask(BaseModel):
         print(f'tasks totaling {len(self.task_ids)}, chose {random_choice}')
         self.defualt_setup(memo=config.memo + f'/n{random_choice}')
         # self.task = CartPoleEnv(random_choice)
-        self.reset_cur_task(random_choice)
+        if not self.single:
+            self.reset_cur_task(random_choice)
         self.task = self.env
+
+    def collect_data(self, sample_nums):
+        print(f'collecting {sample_nums} steps.')
+        state = None
+        current_cnt = 0
+        returns = list()
+        ret = 0
+        for i in range(sample_nums):
+            if state is None: state = self.task.reset()
+            action, logp = self.algo.get_action(ptu.from_numpy(np.expand_dims(state, 0)))  # return cpu version
+            action = ptu.get_numpy(action)[0]
+            next_state, reward, done = single_step_rollout(action, self.task)
+            ret += reward
+            self.replay_buffer.add_sample(task=self.task_ids[0], # single task
+                                          observation=state,
+                                          action=action,
+                                          reward=reward,
+                                          terminal=done,
+                                          next_observation=next_state
+                                          )
+            current_cnt += 1
+            if done or current_cnt==self.max_path_length:
+                self.replay_buffer.terminate_episode(self.task_ids[0])
+                state = None
+                current_cnt = 0
+                returns.append(ret)
+                ret = 0
+            else: state = next_state
+        return np.mean(returns)
+
+    def get_batch(self):
+        batch = self.replay_buffer.random_batch(self.task_ids[0], self.batch_size)
+
+        o = batch['observations']
+        a = batch['actions']
+        r = batch['rewards']
+        no = batch['next_observations']
+        t = batch['terminals']
+
+        o,a,no = [ptu.from_numpy(x) for x in [o,a,no]]
+
+        return o,a,r,no,t
 
     def roll_out(self, state, task, sample_nums, to_cuda=True):
         """
@@ -334,8 +383,8 @@ class Singletask(BaseModel):
         for j in range(sample_nums):
             states.append(state)
 
-            action, logp = self.algo.get_action(torch.Tensor([state]).cuda()) # return cpu version
-            action = action.cpu().data.numpy()[0]
+            action, logp = self.algo.get_action(ptu.from_numpy(np.expand_dims(state, 0))) # return cpu version
+            action = ptu.get_numpy(action)[0]
             next_state, reward, done = single_step_rollout(action, task)
             # one_hot_action = [int(k == action) for k in range(self.action_dim)]
             actions_logp.append(logp)
@@ -373,23 +422,29 @@ class Singletask(BaseModel):
 
         val_cnt = 0
         horizon = HORIZON  # to continuously increase the hardship of the trajectories.
-        gamma = pow(0.05, 1. / horizon)
+        gamma = 0.99#pow(0.05, 1. / horizon)
         double_check = 0
         done = True
         s = None
+        # collect some data
+        self.collect_data(self.max_buffer_size//2)
         for step in range(STEP):
-            # obtain z and experience data to train the actor
-            states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(s, self.task, horizon)
 
-            if is_done[-1,0]: s = None
-            else: s = fin
+            # states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(s, self.task, horizon)
+            # if is_done[-1,0]: s = None
+            # else: s = fin
+            # # sudo_loss, bellman_error, actions_logp, advantages = self.algo.train(states, rewards,
+            # #                                                                                     is_done,
+            # #                                                                                     log_softmax_actions,
+            # #                                                                                     gamma)
+            # # states, actions, rewards, dones, gamma
 
-            # sudo_loss, bellman_error, actions_logp, advantages = self.algo.train(states, rewards,
-            #                                                                                     is_done,
-            #                                                                                     log_softmax_actions,
-            #                                                                                     gamma)
-            # states, actions, rewards, dones, gamma
-            qf_loss, vf_loss, actor_loss, actions_logp, advantages = self.algo.train(states, actions, rewards, is_done, gamma)
+
+            # collect some data
+            self.collect_data(self.max_path_length)
+            states, actions, rewards,nstates,dones = self.get_batch()
+            # train for several steps
+            qf_loss, vf_loss, actor_loss, actions_logp, advantages = self.algo.train(states, actions, rewards, nstates, dones, gamma)
             losses = (qf_loss, vf_loss, actor_loss)
 
             self.writer.add_histogram('actor/actions_logp', actions_logp, step)
@@ -397,22 +452,23 @@ class Singletask(BaseModel):
 
             self.algo.optimize(losses, self.writer, step)
 
-            total_rewards = np.sum(rewards)
-            avg_ret = total_rewards/reward_scale
-            if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
-            loss_buffer.append(avg_ret.item())
-            m = np.mean(list(loss_buffer))
-            self.writer.add_scalar('actor/avg_return', avg_ret, step)
+            # total_rewards = np.sum(rewards)
+            # avg_ret = total_rewards/reward_scale
+            # if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
+            # loss_buffer.append(avg_ret.item())
+            # m = np.mean(list(loss_buffer))
+            # self.writer.add_scalar('actor/avg_return', avg_ret, step)
+
             # if print_every_step:
             #     print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
-            if (step + 1) % actor_report_freq == 0:
-                print(f'step {step} with avg return {m}.')
-                if m > double_horizon_threshold * horizon:
-                    double_check += 1
-                    if double_check == 3:
-                        horizon += HORIZON
-                        print(f'step {step} horizon={horizon}')
-                        double_check = 0
+            # if (step + 1) % actor_report_freq == 0:
+            #     print(f'step {step} with avg return {m}.')
+            #     if m > double_horizon_threshold * horizon:
+            #         double_check += 1
+            #         if double_check == 3:
+            #             horizon += HORIZON
+            #             print(f'step {step} horizon={horizon}')
+            #             double_check = 0
 
             if (step + 1) % policy_task_resample_freq == 0:
                 self.val_and_save(horizon, val_cnt, step)
@@ -438,14 +494,15 @@ class Singletask(BaseModel):
 
 
 def main():
-    env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=1.)
+    env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
+    env2 = gym.make('Ant-v2')
     # model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
     # model = Singletask(env, algo=dict(cls=A2C,
     #                                   params=dict(be_w=1., model_lr=(1e-3, 1e-3), modules=('value_baseline','actor_network')))) # value actor
-    model = Singletask(env, algo=dict(cls=SAC,
+    model = Singletask(env2, algo=dict(cls=SAC,
                                       params=dict(modules=('value_baseline', 'target_v', 'actor_network', 'q1', 'q2'),
-                                                  model_lr=[1e-3]*5)))
+                                                  model_lr=[3e-4]*5)))
     model.deploy()
 
 if __name__ == '__main__':

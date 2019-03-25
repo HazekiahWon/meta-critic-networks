@@ -25,7 +25,7 @@ n_sample = 2
 stochastic_encoder = True
 vae_thresh = 1.
 STEP = 50000
-HORIZON = 20 #5,10,20
+HORIZON = 200 #5,10,20
 TEST_SAMPLE_NUMS = 5
 use_baseline = True
 
