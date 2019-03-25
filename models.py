@@ -15,6 +15,7 @@ from rlkit.envs.half_cheetah_dir import HalfCheetahDirEnv
 from rlkit.envs.wrappers import NormalizedBoxEnv
 from rlkit.torch import pytorch_util as ptu
 import gym
+from test import NormalizedActions
 
 class BaseModel():
     def __init__(self, env, algo, single=False):
@@ -24,7 +25,7 @@ class BaseModel():
         self.state_dim = env.observation_space.shape[0]
         self.action_dim = env.action_space.shape[0]
         self.algo = algo['cls'](self.state_dim, self.action_dim, **algo['params'])
-        max_size = 5000
+        max_size = 100000
         self.max_buffer_size = max_size
         self.replay_buffer = MultiTaskReplayBuffer(max_replay_buffer_size=max_size, env=env, tasks=self.task_ids)
         self.max_path_length = 200
@@ -646,41 +647,22 @@ class Singletask(BaseModel):
         done = True
         s = None
         # collect some data
-        self.collect_data(self.max_buffer_size//2)
+        self.collect_data(self.max_path_length*5)
         for step in range(STEP):
 
-            # states, actions, rewards, is_done, log_softmax_actions, fin = self.roll_out(s, self.task, horizon)
-            # if is_done[-1,0]: s = None
-            # else: s = fin
-            # # sudo_loss, bellman_error, actions_logp, advantages = self.algo.train(states, rewards,
-            # #                                                                                     is_done,
-            # #                                                                                     log_softmax_actions,
-            # #                                                                                     gamma)
-            # # states, actions, rewards, dones, gamma
-
-
             # collect some data
-            total_rewards = self.collect_data(self.max_path_length)
+            if step%self.max_path_length==0:
+                total_rewards = self.collect_data(self.max_path_length)
+                avg_ret = total_rewards / reward_scale
+                # if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
+                # loss_buffer.append(avg_ret.item())
+                # m = np.mean(list(loss_buffer))
+                self.writer.add_scalar('actor/avg_return', avg_ret, step)
             states, actions, rewards,nstates,dones = self.get_batch()
             # train for several steps
-            qf_loss, vf_loss, actor_loss, actions_logp, advantages, aux = self.algo.train(states, actions, rewards, nstates, dones, gamma)
-            losses = (qf_loss, vf_loss, actor_loss)
-            q1,q_target = aux
-            self.writer.add_histogram('q1',q1, step)
-            # self.writer.add_histogram('q2', q2, step)
-            self.writer.add_histogram('qt', q_target, step)
+            self.algo.train(states, actions, rewards, nstates, dones, gamma, self.writer, step)
 
-            self.writer.add_histogram('actor/actions_logp', actions_logp, step)
-            self.writer.add_histogram('actor/advantages', advantages, step)
 
-            self.algo.optimize(losses, self.writer, step)
-
-            # total_rewards = np.sum(rewards)
-            avg_ret = total_rewards/reward_scale
-            if len(loss_buffer) == actor_report_freq: loss_buffer.popleft()
-            loss_buffer.append(avg_ret.item())
-            m = np.mean(list(loss_buffer))
-            self.writer.add_scalar('actor/avg_return', avg_ret, step)
 
             # if print_every_step:
             #     print(f'step {step} with return {avg_ret}, bellman={bellman_error}, sudo={sudo_loss}')
@@ -718,7 +700,7 @@ class Singletask(BaseModel):
 
 def main():
     env = NormalizedBoxEnv(HalfCheetahDirEnv(), reward_scale=0.1)
-    env2 = gym.make('Pendulum-v0')
+    env2 = NormalizedActions(gym.make("Pendulum-v0"))
     # model = Multitask(env, algo=A2C(1), model_lr=(10e-3,10e-3,10e-3,5e-3))
     # model.deploy()
     # model = Singletask(env, algo=dict(cls=A2C,

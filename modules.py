@@ -140,7 +140,7 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
     def forward(
             self,
             obs,
-            reparameterize=True,
+            reparameterize=False,
             deterministic=False,
     ):
         """
@@ -179,7 +179,7 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
         )
         log_prob = log_prob.sum(dim=1, keepdim=True)
 
-        return action.cuda(), pre_tanh_value.cuda(), log_prob.cuda(), mean, log_std
+        return action.cuda(), log_prob.cuda(), pre_tanh_value.cuda(), mean, log_std
 
 class FlattenMlp(Mlp):
     """

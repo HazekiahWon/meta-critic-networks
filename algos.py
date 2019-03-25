@@ -2,6 +2,7 @@ from common_imports import *
 from utils import *
 from rlkit.data_management.env_replay_buffer import MultiTaskReplayBuffer
 from modules import *
+from test import PolicyNetwork
 
 class BaseAlgo():
     def __init__(self, state_dim, action_dim, modules, model_lr):
@@ -128,17 +129,19 @@ class SAC(BaseAlgo):
         # self.actor_network = GaussianActor(self.state_dim, self.action_dim, nonlin=F.tanh)
         # self.q1 = QBase(self.state_dim, self.action_dim, nonlin=F.elu)
         # self.q2 = QBase(self.state_dim, self.action_dim, nonlin=F.elu)
-        self.value_baseline = FlattenMlp(hidden_sizes=[300]*3,
+        netsize = 256
+        self.value_baseline = FlattenMlp(hidden_sizes=[netsize]*3,
                                          input_size=self.state_dim,
                                          output_size=1)
         self.target_v = self.value_baseline.copy()
-        self.actor_network = TanhGaussianPolicy(hidden_sizes=[300]*3,
-                                                obs_dim=self.state_dim,
-                                                action_dim=self.action_dim)
-        self.q1 = FlattenMlp(hidden_sizes=[300]*3,
+        # self.actor_network = TanhGaussianPolicy(hidden_sizes=[netsize]*3,
+        #                                         obs_dim=self.state_dim,
+        #                                         action_dim=self.action_dim)
+        self.actor_network = PolicyNetwork(self.state_dim, self.action_dim, netsize)
+        self.q1 = FlattenMlp(hidden_sizes=[netsize]*3,
                              input_size=self.state_dim+self.action_dim,
                              output_size=1)
-        self.q2 = FlattenMlp(hidden_sizes=[300]*3,
+        self.q2 = FlattenMlp(hidden_sizes=[netsize]*3,
                              input_size=self.state_dim+self.action_dim,
                              output_size=1)
         super(SAC, self).setup()
@@ -149,7 +152,7 @@ class SAC(BaseAlgo):
             net.cuda()
 
     def get_action(self, *inp, full=False):
-        ret = self.actor_network(*inp)
+        ret = self.actor_network.evaluate(*inp)
         if full: return ret
         else:
             action, pre_a, logp, mean, logstd = ret
@@ -161,7 +164,7 @@ class SAC(BaseAlgo):
         min_q = torch.min(q1, q2)
         return min_q, q1
 
-    def train(self, states, actions, rewards, nstates, dones, gamma, entropy_fn=None):
+    def train(self, states, actions, rewards, nstates, dones, gamma, writer, step, entropy_fn=None):
         """
         do make sure logp and adv be of shape (n,1)
         :param states: n+1,20
@@ -173,58 +176,55 @@ class SAC(BaseAlgo):
         :param entropy_fn:
         :return:
         """
-        # ? where to get actions
+        soft_q_net, value_net, policy_net, target_value_net = self.q1, self.value_baseline, self.actor_network, self.target_v
+        soft_q_criterion = nn.MSELoss()
+        value_criterion = nn.MSELoss()
+        mean_lambda,std_lambda,z_lambda = self.a_mean_w,self.a_std_w,self.pre_a_w
+        soft_q_optimizer,value_optimizer,policy_optimizer = [self.model_opt[x] for x in ['q1','value_baseline','actor_network']]
 
-        q1 = self.q1(states, actions)
-        # q2 = self.q2(states, actions)
-        v = self.value_baseline(states) # z detach
+        expected_q_value = soft_q_net(states, actions)
+        expected_value = value_net(states)
+        new_action, log_prob, z, mean, log_std = policy_net.evaluate(states)
+        # q
+        target_value = target_value_net(nstates)
+        next_q_value = rewards + (1 - dones) * gamma * ptu.get_numpy(target_value)
+        q_value_loss = soft_q_criterion(expected_q_value, ptu.from_numpy(next_q_value))
+        # v
+        expected_new_q_value = soft_q_net(states, new_action)
+        next_value = expected_new_q_value - log_prob
+        value_loss = value_criterion(expected_value, next_value.detach())
+        # p
+        log_prob_target = expected_new_q_value - expected_value
+        adv = log_prob - log_prob_target # oyster uses this
+        policy_loss = (log_prob * adv.detach()).mean()
 
-        new_actions, pre_tanh_a, logp, mean_action, logstd_action = self.get_action(states, full=True)
+        mean_loss = mean_lambda * mean.pow(2).mean()
+        std_loss = std_lambda * log_std.pow(2).mean()
+        z_loss = z_lambda * z.pow(2).sum(1).mean()
 
-        target_v = self.target_v(nstates)
-        target_v = ptu.get_numpy(target_v)
+        policy_loss += mean_loss + std_loss + z_loss
 
-        q_target = rewards + (1.-dones)*gamma*target_v
-        q_target = ptu.from_numpy(q_target)
-        qf_loss = 10.*(torch.mean((q1-q_target)**2))#+torch.mean((q2-q_target)**2)) # q1,q2,contextenc
+        soft_q_optimizer.zero_grad()
+        q_value_loss.backward()
+        soft_q_optimizer.step()
 
-        # min_q
-        # min_q,logp_target = self.min_q(states, new_actions)
-        logp_target = self.q1(states, new_actions)
-        min_q = logp_target
-        v_target = min_q - logp
-        criterion = nn.MSELoss()
-        vf_loss = criterion(v, v_target.detach()) # value_baseline, target_v (soft update, see line189 sac.py)
+        value_optimizer.zero_grad()
+        value_loss.backward()
+        value_optimizer.step()
 
-        # logp_target = min_q
-        adv = logp - logp_target + v
-        # reparameterize
-        policy_loss = (logp - logp_target).mean()
-        actor_loss = policy_loss + self.a_mean_w*(mean_action**2).mean() + self.a_std_w*(logstd_action**2).mean()\
-                     + self.pre_a_w*(pre_tanh_a**2).sum(dim=1).mean()
+        policy_optimizer.zero_grad()
+        policy_loss.backward()
+        policy_optimizer.step()
 
-        aux = (q1, q_target)
-
-        return qf_loss, vf_loss, actor_loss, logp, adv, aux
-
-    def optimize(self, losses, writer, step):
-
-        qf_loss,vf_loss,actor_loss = losses
-        self.q1.zero_grad()
-        self.q2.zero_grad()
-        qf_loss.backward()
-        step_optimizers(self.model_dict, self.model_opt, ('q1','q2'))
-        self.value_baseline.zero_grad()
-        vf_loss.backward()
-        step_optimizers(self.model_dict, self.model_opt, ('value_baseline',))
         ptu.soft_update_from_to(self.value_baseline, self.target_v, self.soft_update_weight)
-        self.actor_network.zero_grad()
-        actor_loss.backward()
-        step_optimizers(self.model_dict, self.model_opt, ('actor_network',))
 
-        writer.add_scalar('actor/qf_loss', qf_loss, step)
-        writer.add_scalar('actor/vf_loss', vf_loss, step)
-        writer.add_scalar('actor/actor_loss', actor_loss, step)
+        writer.add_scalar('vloss', value_loss, step)
+        writer.add_scalar('qloss', q_value_loss, step)
+        writer.add_scalar('ploss', policy_loss, step)
+        writer.add_histogram('logp', log_prob, step)
+        writer.add_histogram('adv', log_prob - log_prob_target, step)
+        writer.add_histogram('q', expected_q_value, step)
+        writer.add_histogram('qt', next_q_value, step)
 
 
 class Entropy:
