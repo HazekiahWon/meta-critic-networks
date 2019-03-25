@@ -2,6 +2,7 @@ from common_imports import *
 from config import *
 import numpy as np
 from cartpole import CartPoleEnv
+import gym
 
 
 
@@ -85,3 +86,22 @@ def one_hot_action_sample(task):
     sam = task.action_space.sample()
     a[sam] = 1
     return a
+
+class NormalizedActions(gym.ActionWrapper):
+    def action(self, action):
+        low = self.action_space.low
+        high = self.action_space.high
+
+        action = low + (action + 1.0) * 0.5 * (high - low)
+        action = np.clip(action, low, high)
+
+        return action
+
+    def reverse_action(self, action):
+        low = self.action_space.low
+        high = self.action_space.high
+
+        action = 2 * (action - low) / (high - low) - 1
+        action = np.clip(action, low, high)
+
+        return action

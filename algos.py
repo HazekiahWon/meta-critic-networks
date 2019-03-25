@@ -134,10 +134,10 @@ class SAC(BaseAlgo):
                                          input_size=self.state_dim,
                                          output_size=1)
         self.target_v = self.value_baseline.copy()
-        # self.actor_network = TanhGaussianPolicy(hidden_sizes=[netsize]*3,
-        #                                         obs_dim=self.state_dim,
-        #                                         action_dim=self.action_dim)
-        self.actor_network = PolicyNetwork(self.state_dim, self.action_dim, netsize)
+        self.actor_network = TanhGaussianPolicy(hidden_sizes=[netsize]*3,
+                                                obs_dim=self.state_dim,
+                                                action_dim=self.action_dim)
+        # self.actor_network = PolicyNetwork(self.state_dim, self.action_dim, netsize)
         self.q1 = FlattenMlp(hidden_sizes=[netsize]*3,
                              input_size=self.state_dim+self.action_dim,
                              output_size=1)
@@ -152,10 +152,10 @@ class SAC(BaseAlgo):
             net.cuda()
 
     def get_action(self, *inp, full=False):
-        ret = self.actor_network.evaluate(*inp)
+        ret = self.actor_network(*inp)
         if full: return ret
         else:
-            action, pre_a, logp, mean, logstd = ret
+            action, logp, pre_a, mean, logstd = ret
             return action,logp
 
     def min_q(self, states, actions):
@@ -184,7 +184,7 @@ class SAC(BaseAlgo):
 
         expected_q_value = soft_q_net(states, actions)
         expected_value = value_net(states)
-        new_action, log_prob, z, mean, log_std = policy_net.evaluate(states)
+        new_action, log_prob, z, mean, log_std = policy_net(states)
         # q
         target_value = target_value_net(nstates)
         next_q_value = rewards + (1 - dones) * gamma * ptu.get_numpy(target_value)
@@ -195,7 +195,7 @@ class SAC(BaseAlgo):
         value_loss = value_criterion(expected_value, next_value.detach())
         # p
         log_prob_target = expected_new_q_value - expected_value
-        adv = log_prob - log_prob_target # oyster uses this
+        adv = log_prob - log_prob_target# oyster uses this
         policy_loss = (log_prob * adv.detach()).mean()
 
         mean_loss = mean_lambda * mean.pow(2).mean()
